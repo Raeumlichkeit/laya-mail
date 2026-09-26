@@ -1,0 +1,103 @@
+# Laya Mail
+
+Lokale Weboberfläche zum Sortieren von Gmail-Nachrichten mit [Laya](https://github.com/NandhaKishorM/laya). Sie zeigt Vorschläge, unsichere Fälle und manuelle Korrekturen. Ein kleiner Ubuntu-Server kann Dashboard und Daten verwalten, während ein Windows-PC mit NVIDIA-GPU die Auswertung übernimmt.
+
+## Funktionen
+
+- Pro Durchlauf 1–100 Mails aus dem Posteingang laden; neue Stapel überspringen bereits angezeigte Nachrichten.
+- Inhalt: **Rechnung**, **Allgemeine Information**, **Werbung**, **Sonstiges**.
+- **Wichtig** und **Spamverdacht** werden unabhängig davon bewertet.
+- Vorschläge bestätigen, korrigieren oder überspringen; Bewertungen bleiben über Durchläufe hinweg gespeichert.
+- Bestätigte Beispiele als JSONL für späteres Training exportieren.
+- GPU vor jedem Stapel automatisch auswählen; bei nicht verfügbarem GPU-Dienst CPU verwenden.
+
+Gmail wird ausschließlich mit `gmail.readonly` gelesen. Das Programm verändert keine Gmail-Labels, versendet und löscht keine E-Mails. Bewertungen sammeln Trainingsbeispiele; sie lösen **noch kein Fine-Tuning** aus. Anhänge und verlinkte Seiten werden nicht gelesen. Modell-Scores sind keine gemessenen Zuverlässigkeitsquoten.
+
+## Aufbau
+
+```text
+mail/       Dashboard, Gmail-Abruf, OAuth-Helfer, Weboberfläche und Offline-Tests
+gpu/        Optionaler Windows-GPU-Dienst und Start-/Stoppskripte
+deploy/     Vorlagen für systemd und lokale Konfiguration
+runtime/    Lokale Laufzeitdaten (nicht im Repository)
+```
+
+Das Repository enthält den Anwendungscode, keine Postfachdaten, Zugangsschlüssel, Python-Umgebungen oder Modellgewichte. Laya wird als separate Abhängigkeit installiert; dessen Quellcode und Gewichte werden hier nicht mitgeliefert.
+
+## Dashboard einrichten
+
+Voraussetzungen: Python 3.12 oder neuer, ein eigener Google-Desktop-OAuth-Client mit aktivierter Gmail API und ein laufender Laya-Server mit geladenem Modell `multilingual`. Getestet wurde Laya 0.3.20. Laya muss über eine konkrete lokale IP-Adresse unter `/v1/systemone` erreichbar sein und einen API-Schlüssel verlangen. Die [Laya-Dokumentation](https://nandhakishorm.github.io/laya/) beschreibt dessen Installation.
+
+Im geklonten Repository unter Ubuntu:
+
+```sh
+python3 -m venv .venv
+.venv/bin/python -m pip install -r mail/requirements.txt
+install -d -m 700 runtime/private
+umask 077
+.venv/bin/python -c "from pathlib import Path; import secrets; Path('runtime/private/dashboard-key').write_text(secrets.token_urlsafe(32))"
+```
+
+Den letzten Befehl nur beim ersten Einrichten ausführen: Er erzeugt den Anmeldecode des Dashboards. Den API-Schlüssel des bestehenden Laya-Servers in `runtime/private/laya-api-key` speichern und die heruntergeladene Google-Clientdatei als `runtime/private/client.json` ablegen. Unter Windows vor dem Speichern der Dateien die Verzeichnisrechte auf den eigenen Benutzer und SYSTEM beschränken.
+
+Die Google-Freigabe auf dem Rechner durchführen, auf dem auch der Browser geöffnet wird:
+
+```sh
+.venv/bin/python mail/authorize_gmail.py \
+  --client runtime/private/client.json \
+  --token runtime/private/token.json \
+  --project-id DEINE_GOOGLE_PROJEKT_ID
+```
+
+Die im Terminal angezeigte Google-Adresse persönlich im Browser öffnen und die Leseberechtigung freigeben. Der Helfer überschreibt keine bestehende Tokendatei. Bei getrennten Rechnern `token.json` anschließend über eine geschützte Verbindung auf den Dashboard-Rechner übertragen. Für eine bereits eingerichtete Installation können die vorhandenen privaten Dateien weiterverwendet werden; keine neue Google-Freigabe allein wegen dieses Repositorys erforderlich.
+
+Starten, dabei Adresse und Modell-URL anpassen:
+
+```sh
+.venv/bin/python mail/dashboard.py \
+  --data runtime/private \
+  --account you@gmail.com \
+  --host 127.0.0.1 \
+  --port 8001 \
+  --laya-url http://127.0.0.1:8000/v1/systemone
+```
+
+Dann `http://127.0.0.1:8001` öffnen und den Code aus `runtime/private/dashboard-key` eingeben. Für andere Geräte im Heimnetz `--host` auf die konkrete LAN-IP des Servers setzen und exakt diese Adresse im Browser verwenden. Das Dashboard ist für ein vertrauenswürdiges Heimnetz gedacht, nicht für eine öffentliche Portfreigabe; HTTP verschlüsselt die Verbindung nicht.
+
+## GPU auf einem zweiten Rechner
+
+Die [GPU-Anleitung](gpu/README.md) beschreibt die Windows-Einrichtung. Beispieladressen in diesem Repository sind Platzhalter und müssen zur eigenen Umgebung passen.
+
+Auf dem Dashboard-Rechner `deploy/gpu-backend.example.json` als `runtime/private/gpu-backend.json` ablegen und die GPU-IP anpassen. Den gleichen GPU-API-Schlüssel wie auf dem Windows-PC als `runtime/private/gpu-api-key` speichern. Vor dem nächsten Stapel prüft das Dashboard `/health`; bei erreichbarem CUDA-Modell nutzt es die GPU. Während eines laufenden Stapels wird nicht automatisch auf ein anderes Gerät gewechselt.
+
+In der ursprünglichen Installation brauchten zehn identische Mail-Eingaben auf einer RTX 4070 Ti 1,1 Sekunden statt 45,3 Sekunden auf einem Mac mini von 2014. Ein vollständiger Stapel mit 100 Nachrichten einschließlich Gmail-Abruf dauerte 26 Sekunden statt zuvor 8 Minuten 43 Sekunden. Das sind Messwerte dieser Installation, keine Garantie für andere Geräte oder Postfächer.
+
+## Als Ubuntu-Dienst betreiben
+
+Die Vorlagen in `deploy/` gehen von folgenden Pfaden aus:
+
+- Repository und virtuelle Umgebung: `/opt/laya-mail` und `/opt/laya-mail/.venv`.
+- Eigener Systembenutzer und Gruppe: `laya-mail`.
+- Privates Datenverzeichnis: `/var/lib/laya-mail`, Eigentümer `laya-mail`, Modus `0700`; enthaltene Geheimnisse Modus `0600`.
+- Konfiguration: `/etc/laya-mail/dashboard.env`, aus `deploy/dashboard.env.example` kopieren und anpassen.
+
+Die Servicevorlage als `/etc/systemd/system/laya-mail-dashboard.service` installieren, anschließend `sudo systemctl daemon-reload` und `sudo systemctl enable --now laya-mail-dashboard` ausführen. Die Einheit erlaubt Schreibzugriffe nur im privaten Datenverzeichnis. Vor Umstellungen laufende Stapel abschließen lassen und das private Datenverzeichnis sichern.
+
+`deploy/run-pilot.sh.example` ist ein optionaler manueller CPU-Durchlauf. Unter dem Dienstbenutzer ausführen, `MAIL_ACCOUNT` setzen und bei Bedarf Pfade und `LAYA_URL` anpassen.
+
+## Entwicklung und Tests
+
+Die Tests verwenden synthetische Nachrichten, keine Google-Anmeldung und kein geladenes Modell:
+
+```sh
+.venv/bin/python -m unittest discover -s mail -v
+node mail/web/check-ui.cjs
+```
+
+Node.js wird nur für den UI-Test benötigt; die Oberfläche braucht keinen Build-Schritt. Geprüft werden unter anderem Lesebeschränkungen, OAuth-Konfiguration, Anmeldung, Herkunftsprüfung, Stapelgrößen, Pagination, GPU-Auswahl, gespeicherte Korrekturen, Trainingsdatenexport und sicheres Anzeigen von Mailtext.
+
+## Daten und Grenzen
+
+`pilot-*.json` enthält Mailauszüge und die genaue begrenzte Modelleingabe. `feedback.json` enthält menschliche Bewertungen samt Eingabe. Beides gehört ausschließlich ins private Datenverzeichnis. `.gitignore` schließt Laufzeitdaten, Schlüssel, lokale Konfiguration, Modellgewichte und Trainingsdateien aus; vor jedem Commit trotzdem die vorgemerkten Dateien prüfen.
+
+Sehr lange Texte werden gekürzt; das Modell kann zusätzlich sein Tokenlimit anwenden. Unsichere oder unvollständige Eingaben sollten geprüft oder übersprungen werden. Ein späteres Fine-Tuning benötigt einen eigenen Trainingsablauf und getrennte Prüfdaten. Die Lebensdauer der Google-Freigabe hängt unter anderem vom OAuth-Veröffentlichungsstatus ab; die App kann bei abgelaufener Freigabe eine erneute Anmeldung benötigen.

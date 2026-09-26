@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Laya Mail · Übersicht</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <header class="site-header">
+    <div class="header-inner">
+      <a class="brand" href="/" aria-label="Laya Mail Übersicht"><span class="brand-mark" aria-hidden="true">L</span><span>Laya <span class="brand-light">Mail</span></span></a>
+      <div class="header-actions"><span class="readonly-badge"><span aria-hidden="true">◈</span> Gmail nur lesen</span><button id="logout" class="text-button" type="button">Abmelden</button></div>
+    </div>
+  </header>
+
+  <main>
+    <div class="page-heading"><p class="eyebrow">Dein Postfach im Blick</p><h1>Die Übersicht für deine Mails.</h1><p class="intro">Laya schlägt Kategorien vor. Du siehst, was deine Aufmerksamkeit braucht.</p></div>
+    <div id="api-error" class="notice error-notice" role="alert" hidden></div>
+
+    <section class="status-panel" aria-labelledby="status-heading">
+      <div class="status-main"><div class="status-symbol" id="status-symbol" aria-hidden="true"><span></span></div><div><p class="eyebrow">Lokale Auswertung</p><h2 id="status-heading">Verbindung wird hergestellt …</h2><p id="status-description" class="muted" role="status" aria-live="polite">Der aktuelle Stand wird geladen.</p><p id="processing-location" class="processing-location">Auswertung: Mac mini · CPU</p><p id="processing-note" class="processing-note" hidden></p></div></div>
+      <div class="batch-actions"><label class="count-control" for="mail-limit"><span>Anzahl Mails</span><input id="mail-limit" type="number" min="1" max="100" step="1" value="20" inputmode="numeric" required aria-describedby="mail-limit-help" disabled></label><span id="mail-limit-help" class="count-help">1–100 · Größere Mengen dauern länger.</span><button id="run-next" class="primary-button" type="button" disabled><span aria-hidden="true">↗</span><span id="run-next-label">Nächste 20 Mails laden</span></button><button id="run" class="secondary-button" type="button" disabled><span id="run-label">20 Mails prüfen</span></button></div>
+      <p class="batch-note">„Nächste Mails laden“ holt bisher nicht angezeigte Nachrichten aus dem Posteingang. Bewertungen bleiben erhalten.</p>
+      <div id="progress-wrap" class="progress-wrap" hidden><progress id="progress" max="20" value="0" aria-label="Fortschritt der Auswertung"></progress><p>Der bestehende Bericht bleibt während der Auswertung sichtbar.</p></div>
+    </section>
+
+    <div class="metrics" aria-label="Letzter Bericht">
+      <div class="metric"><span class="metric-label">Nachrichten im Bericht</span><strong id="message-count">—</strong><span id="message-limit-note" class="metric-note">je Durchlauf</span></div>
+      <div class="metric"><span class="metric-label">Bitte prüfen</span><strong id="review-count">—</strong><span class="metric-note">mit Hinweisen oder Fehlern</span></div>
+      <div class="metric"><span class="metric-label">Letzte Auswertung</span><strong id="report-date" class="date-value">—</strong><span id="report-time" class="metric-note">Noch kein Bericht geladen</span></div>
+    </div>
+
+    <section class="training-panel" aria-labelledby="training-heading">
+      <div class="training-heading"><div><h2 id="training-heading">Deine Bewertungen</h2><p class="muted">Bestätige oder korrigiere Vorschläge. So sammelst du lokale Trainingsbeispiele.</p></div><a id="training-export" class="secondary-button export-link" href="/api/training-export" download hidden>Trainingsdaten herunterladen</a></div>
+      <div class="review-progress"><div><strong id="review-progress-text">0 von 0 bewertet</strong><span id="review-progress-detail">0 übersprungen · 0 unbewertet</span></div><strong id="training-count">0 Trainingsbeispiele</strong></div>
+      <progress id="review-progress" max="1" value="0" aria-label="Fortschritt deiner Bewertungen"></progress>
+      <p class="training-note">Bewertungen ändern keine Gmail-Labels. Das Modell lernt erst durch einen späteren Trainingslauf. Der Export enthält die ausgewerteten Mailtexte.</p>
+    </section>
+
+    <section class="mail-section" aria-labelledby="mail-heading">
+      <div class="section-heading"><div><h2 id="mail-heading">Sortiervorschläge <span id="visible-count" class="count-badge">0</span></h2><p class="muted">Inhaltskategorie, Wichtigkeit und Spamverdacht werden getrennt bewertet.</p></div><label class="search"><span aria-hidden="true">⌕</span><span class="sr-only">Mails durchsuchen</span><input id="search" type="search" placeholder="Mails durchsuchen …" autocomplete="off" maxlength="300"></label></div>
+      <div class="filters" role="group" aria-label="Vorschläge filtern">
+        <button type="button" data-filter="all" aria-pressed="true">Alle</button><button type="button" data-filter="unreviewed" aria-pressed="false">Unbewertet</button><button type="button" data-filter="review" aria-pressed="false">Bitte prüfen</button><button type="button" data-filter="rechnung" aria-pressed="false">Rechnungen</button><button type="button" data-filter="werbung" aria-pressed="false">Werbung</button><button type="button" data-filter="wichtig" aria-pressed="false">Wichtig</button><button type="button" data-filter="spam" aria-pressed="false">Spamverdacht</button>
+      </div>
+      <p class="review-explanation">„Bitte prüfen“ zeigt unbewertete Auffälligkeiten nach einfachen Prüfregeln, keine gemessene Fehlerquote. Kategorienfilter berücksichtigen deine Bewertung.</p>
+      <div id="editing-note" class="editing-note" hidden><span role="status">Eine Korrektur ist geöffnet. Automatische Berichtswechsel warten, bis du speicherst oder abbrichst.</span><button id="return-correction" class="secondary-button" type="button">Zur offenen Korrektur</button></div>
+      <div id="messages" class="messages" aria-busy="true"></div>
+      <div id="empty" class="empty-state" hidden><span class="empty-symbol" aria-hidden="true">↳</span><h3 id="empty-heading">Noch keine Auswertung</h3><p id="empty-description">Starte die erste Prüfung, um hier Vorschläge zu sehen.</p><button id="reset-filters" class="secondary-button" type="button" hidden>Filter zurücksetzen</button></div>
+    </section>
+
+    <details id="limitations" class="limitations" hidden><summary>Hinweise zu dieser Auswertung</summary><ul id="limitations-list"></ul></details>
+    <footer><span><span class="local-dot" aria-hidden="true"></span> Dashboard und Daten: Mac mini</span><p>Vorschläge und Bewertungen werden lokal gespeichert. Gmail-Nachrichten und Labels bleiben unverändert.</p></footer>
+  </main>
+</body>
+</html>

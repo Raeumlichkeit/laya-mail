@@ -1,0 +1,17 @@
+#!/bin/sh
+# Run as the service user. Set these values for your installation first.
+set -eu
+umask 077
+: "${MAIL_ACCOUNT:?Set MAIL_ACCOUNT to the Gmail address being authorized}"
+APP_ROOT=${APP_ROOT:-/opt/laya-mail}
+DATA_DIR=${DATA_DIR:-/var/lib/laya-mail}
+LAYA_URL=${LAYA_URL:-http://127.0.0.1:8000/v1/systemone}
+report="$DATA_DIR/pilot-$(date -u +%Y%m%dT%H%M%SZ).json"
+"$APP_ROOT/.venv/bin/python" "$APP_ROOT/mail/pilot_gmail.py" \
+  --token "$DATA_DIR/token.json" \
+  --laya-key-file "$DATA_DIR/laya-api-key" \
+  --output "$report" \
+  --expected-account "$MAIL_ACCOUNT" \
+  --laya-url "$LAYA_URL" \
+  --limit "${1:-20}"
+printf 'Bericht: %s\n' "$report"

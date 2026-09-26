@@ -1,0 +1,24 @@
+[Unit]
+Description=Laya Mail local read-only Gmail dashboard
+Wants=network-online.target
+After=network-online.target docker.service
+
+[Service]
+Type=simple
+User=laya-mail
+Group=laya-mail
+WorkingDirectory=/opt/laya-mail
+EnvironmentFile=/etc/laya-mail/dashboard.env
+ExecStart=/opt/laya-mail/.venv/bin/python /opt/laya-mail/mail/dashboard.py --data /var/lib/laya-mail --account ${MAIL_ACCOUNT} --host ${DASHBOARD_HOST} --port 8001 --laya-url ${LAYA_URL}
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/laya-mail
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target
