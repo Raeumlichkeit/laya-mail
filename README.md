@@ -7,20 +7,24 @@ Lokale Weboberfläche zum Sortieren von Gmail-Nachrichten mit [Laya](https://git
 - Pro Durchlauf 1–100 Mails aus dem Posteingang laden; neue Stapel überspringen bereits angezeigte Nachrichten.
 - Inhalt: **Rechnung**, **Allgemeine Information**, **Werbung**, **Sonstiges**.
 - **Wichtig** und **Spamverdacht** werden unabhängig davon bewertet.
+- **⚡ Live GPU-Statusanzeige**: Header-Badge zeigt in Echtzeit den Verbindungsstatus und die Latenz der NVIDIA-Grafikkarte (z. B. `RTX 4070 Ti verbunden · 3 ms`), mit automatischem Fallback auf CPU.
+- **✉️ Multi-Account-Modell**: Beliebig viele E-Mail-Adressen über `accounts.json` verwalten; Abfrage einzelner Postfächer oder aller Konten kombiniert direkt im Dashboard.
+- **🏷️ Postfach-Sortier-Toggle**: Optionales automatisches Zuweisen von Labels (`Rechnung`, `Werbung`, `Info`, `Wichtig`, `Spamverdacht`) im Gmail-Postfach – absolut nicht-destruktiv (Mails bleiben im Posteingang, kein Löschen/Archivieren).
+- **🔄 Live-Modus (Autopilot)**: Hintergrund-Daemon, der alle aktiven Postfächer alle 3 Minuten automatisch auf neue Mails prüft, via GPU bewertet und sortiert.
 - **Speed-Annotation & Tastaturkürzel**: Schnelles Bewerten mit `1` (Stimmt), `2` (Korrigieren), `3` (Überspringen) und `J`/`K` zur Navigation.
 - **Active Learning**: Eigener Filter für „Wackelkandidaten“ (knappe Modellentscheidungen) zum gezielten Anlernen an Grenzfällen.
 - **Signalwort-Hervorhebung**: Automatische Markierung von Signalbegriffen (Rechnungsbegriffe, Dringlichkeit, Phishing/Spam) im Mailtext.
 - **Datensatz-Verteilung & Split-Export**: Visuelle Klassen-Balance im Dashboard und deterministischer Export für Training (80%) und Validierung (20%).
-- **Lokale Fine-Tuning-Pipeline**: Skripte für GPU-Training (`gpu/train_laya.py`) und Modell-Evaluation (`gpu/evaluate_model.py`) auf dem Windows-PC.
+- **Lokale Fine-Tuning-Pipeline**: 1-Klick-Skripte für GPU-Training (`gpu/train_laya.py`) und Modell-Evaluation (`gpu/evaluate_model.py`) auf dem Windows-PC.
 - GPU vor jedem Stapel automatisch auswählen; bei nicht verfügbarem GPU-Dienst CPU verwenden.
 
-Gmail wird ausschließlich mit `gmail.readonly` gelesen. Das Programm verändert keine Gmail-Labels, versendet und löscht keine E-Mails. Anhänge und verlinkte Seiten werden nicht gelesen. Modell-Scores sind keine gemessenen Zuverlässigkeitsquoten.
+Im Standardmodus liest Laya Mail mit `gmail.readonly`. Bei aktiviertem Sortier-Toggle werden ausschließlich Klassifizierungs-Labels vergeben (`gmail.modify`). Das Programm versendet und löscht unter keinen Umständen E-Mails; alle Nachrichten verbleiben sicher im Posteingang. Anhänge und verlinkte Seiten werden nicht gelesen. Modell-Scores sind keine gemessenen Zuverlässigkeitsquoten.
 
 ## Aufbau
 
 ```text
-mail/       Dashboard, Gmail-Abruf, OAuth-Helfer, Weboberfläche und Offline-Tests
-gpu/        Optionaler Windows-GPU-Dienst und Start-/Stoppskripte
+mail/       Dashboard, Gmail-Abruf, Label-Manager, Multi-Account, Watcher, Weboberfläche und Tests
+gpu/        Optionaler Windows-GPU-Dienst, 1-Click-Trainingsskripte und Start-/Stoppskripte
 deploy/     Vorlagen für systemd und lokale Konfiguration
 runtime/    Lokale Laufzeitdaten (nicht im Repository)
 ```
@@ -94,6 +98,7 @@ Die Tests verwenden synthetische Nachrichten, keine Google-Anmeldung und kein ge
 
 ```sh
 .venv/bin/python -m unittest discover -s mail -v
+.venv/bin/python -m unittest discover -s gpu -v
 node mail/web/check-ui.cjs
 ```
 
