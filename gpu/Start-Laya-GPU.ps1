@@ -22,7 +22,7 @@ $existing = Get-CimInstance Win32_Process -Filter "Name='python.exe'" |
 if ($existing) { Write-Output 'Laya GPU startet bereits.'; exit 0 }
 $logPath = Join-Path $repoRoot 'runtime\gpu'
 New-Item -ItemType Directory -Path $logPath -Force | Out-Null
-Start-Process -FilePath $pythonPath -ArgumentList @('-u', ('"' + $scriptPath + '"'), '--config', ('"' + $configPath + '"')) `
+Start-Process -FilePath $pythonPath -ArgumentList @('-u', $scriptPath, '--config', $configPath) `
     -WorkingDirectory $repoRoot -WindowStyle Hidden `
     -RedirectStandardOutput (Join-Path $logPath 'server.log') `
     -RedirectStandardError (Join-Path $logPath 'server-error.log') | Out-Null
