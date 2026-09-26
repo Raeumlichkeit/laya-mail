@@ -23,7 +23,7 @@ const get = (id) => {
   return nodes.get(id);
 };
 get('mail-limit').value = '20';
-const filters = ['all', 'unreviewed', 'review', 'rechnung', 'werbung', 'wichtig', 'spam'].map((value) => {
+const filters = ['all', 'unreviewed', 'uncertain', 'review', 'rechnung', 'werbung', 'wichtig', 'spam'].map((value) => {
   const node = new Node('button'); node.dataset.filter = value; return node;
 });
 const walk = (node) => [node, ...node.children.flatMap(walk)];

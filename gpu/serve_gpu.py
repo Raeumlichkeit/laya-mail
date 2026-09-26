@@ -94,10 +94,13 @@ def serve(config):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, default=Path(__file__).with_name("config.local.json"))
+    parser.add_argument("--model-path", type=str, default=None, help="Override configured model path")
     parser.add_argument("--print-config", action="store_true", help="Validate config without loading CUDA or secrets")
     args = parser.parse_args()
     try:
         config = load_config(args.config)
+        if args.model_path:
+            config["model_path"] = str(Path(args.model_path).resolve())
         if args.print_config:
             print(json.dumps(config))
         else:

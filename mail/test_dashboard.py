@@ -79,7 +79,10 @@ class DashboardCheck(unittest.TestCase):
                     self.assertEqual(len(exported.text.splitlines()), 1)  # No duplicate after repeated review.
                     example = exported.json()
                     self.assertEqual(example["state"], report["messages"][0]["model_input"]["state"])
-                    self.assertEqual(example["gold"]["inhalt"]["probabilities"]["rechnung"], 1.0)
+                    self.assertEqual(accepted.json()["summary"]["distribution"]["inhalt"]["rechnung"], 1)
+                    self.assertEqual(example["metadata"]["split"] in {"train", "val"}, True)
+                    split_train = client.get(origin + "/api/training-export?split=train", timeout=5)
+                    self.assertIn("laya-mail-train.jsonl", split_train.headers["Content-Disposition"])
                     self.assertNotIn(key, exported.text)
                     self.assertEqual(client.post(origin + "/api/feedback", json={**feedback, "action": "skipped"},
                                                  headers=headers, timeout=5).json()["summary"]["skipped"], 1)

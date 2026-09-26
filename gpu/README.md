@@ -42,3 +42,26 @@ Offline-Konfigurationsprüfung, ohne GPU, Modell- oder Mailzugriff:
 py -3.12 .\gpu\serve_gpu.py --config .\gpu\config.example.json --print-config
 py -3.12 -m unittest discover -s .\gpu -p 'test_*.py'
 ```
+
+## Lokales Fine-Tuning und Evaluation
+
+Sobald im Dashboard Bewertungen gesammelt und als Trainingsdaten (JSONL) heruntergeladen wurden, kann das Modell auf der RTX 4070 Ti fine-getuned werden.
+
+1. **Fine-Tuning starten** (trainiert standardmäßig die Klassifikationsköpfe mit eingefrorenem Backbone):
+   ```powershell
+   & .\.venv-gpu\Scripts\python.exe gpu/train_laya.py --data laya-mail-training.jsonl --epochs 5 --output-dir runtime/models/laya-mail-custom
+   ```
+   *Optionen:* `--val-data laya-mail-val.jsonl` (separate Validierungsdaten), `--lr 2e-4`, `--batch-size 4`, `--no-freeze-backbone` (für vollständiges Training aller Schichten).
+
+2. **Modell evaluieren und mit dem Basismodell vergleichen**:
+   ```powershell
+   & .\.venv-gpu\Scripts\python.exe gpu/evaluate_model.py --data laya-mail-val.jsonl --model runtime/models/laya-mail-custom --baseline runtime/models/multilingual
+   ```
+   Gibt Trefferquoten, Latenzen und eine Konfusionsmatrix für alle Inhaltskategorien aus.
+
+3. **Neues Modell bereitstellen**:
+   In `gpu/config.local.json` den Pfad anpassen:
+   ```json
+   "model_path": "runtime/models/laya-mail-custom"
+   ```
+   Oder den GPU-Server direkt mit `--model-path` starten. Der Mac mini nutzt den neuen Checkpoint automatisch beim nächsten Mailstapel.

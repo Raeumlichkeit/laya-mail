@@ -14,8 +14,30 @@ let editing = null;
 let saving = false;
 let reportVersion = 0;
 let errorSource = null;
+let selectedMailId = null;
 const contentLabels = { rechnung: 'Rechnung', info: 'Allgemeine Information', werbung: 'Werbung', sonstiges: 'Sonstiges' };
 const reviewLabels = { accepted: 'Bestätigt', corrected: 'Korrigiert', skipped: 'Übersprungen' };
+
+function renderHighlightedText(container, text) {
+  if (!text) return;
+  const regex = /(rechnung(?:sbetrag|snummer|skopie)?|zahlungsziel|fällig(?:keit)?|überweisung|mahnung|quittung|gutschrift|mwst|\beur\b|\bchf\b|\busd\b|€|\$)|(dringend|frist|wichtig|sofort|handlungsbedarf|termin|erinnerung)|(passwort|konto gesperrt|sicherheitswarnung|zugangsdaten|unusual activity|verify your account)/gi;
+  let lastIndex = 0;
+  let match;
+  while ((match = regex.exec(text)) !== null) {
+    if (match.index > lastIndex) {
+      container.append(document.createTextNode(text.slice(lastIndex, match.index)));
+    }
+    const matchedText = match[0];
+    let markClass = 'hl-invoice';
+    if (match[2]) markClass = 'hl-urgent';
+    else if (match[3]) markClass = 'hl-security';
+    container.append(element('mark', markClass, matchedText));
+    lastIndex = regex.lastIndex;
+  }
+  if (lastIndex < text.length) {
+    container.append(document.createTextNode(text.slice(lastIndex)));
+  }
+}
 
 function element(tag, className, text) {
   const node = document.createElement(tag);
@@ -50,6 +72,19 @@ async function api(path, method = 'GET', body = {}) {
 
 function needsReview(mail) {
   return !mail.review && (mail.status === 'error' || mail.needs_review === true);
+}
+
+function isUncertain(mail) {
+  if (mail.review) return false;
+  if (mail.raw_scores && typeof mail.raw_scores === 'object') {
+    for (const q of Object.values(mail.raw_scores)) {
+      if (q && q.probabilities) {
+        const probs = Object.values(q.probabilities).sort((a, b) => b - a);
+        if (probs.length > 1 && (probs[0] - probs[1]) < 0.20) return true;
+      }
+    }
+  }
+  return Boolean(mail.needs_review);
 }
 
 function dateParts(value) {
@@ -215,7 +250,17 @@ function correctionForm(mail) {
 }
 
 function renderMail(mail) {
-  const card = element('article', `mail-card${needsReview(mail) ? ' review-card' : ''}`);
+  const isSelected = selectedMailId ? mail.message_id === selectedMailId : false;
+  const card = element('article', `mail-card${needsReview(mail) ? ' review-card' : ''}${isSelected ? ' selected-card' : ''}`);
+  if (mail.message_id) {
+    card.id = `card-${mail.message_id}`;
+    card.addEventListener('click', () => {
+      if (selectedMailId !== mail.message_id) {
+        selectedMailId = mail.message_id;
+        renderMessages();
+      }
+    });
+  }
   const top = element('div', 'mail-top');
   const identity = element('div');
   identity.append(element('h3', 'mail-subject', mail.subject || '(Ohne Betreff)'), element('p', 'mail-sender', mail.sender || 'Absender nicht verfügbar'));
@@ -240,7 +285,11 @@ function renderMail(mail) {
     evaluation.append(element('p', 'evaluation-note', `${note}${date ? ` · ${date.day}, ${date.time}` : ''}`));
     card.append(evaluation);
   }
-  if (mail.excerpt) card.append(element('p', 'mail-excerpt', mail.excerpt));
+  if (mail.excerpt) {
+    const excerpt = element('p', 'mail-excerpt');
+    renderHighlightedText(excerpt, mail.excerpt);
+    card.append(excerpt);
+  }
   if (Array.isArray(mail.attachment_names) && mail.attachment_names.length) {
     card.append(element('p', 'attachments', `Anhänge: ${mail.attachment_names.join(' · ')}`));
   }
@@ -286,12 +335,13 @@ function renderMail(mail) {
   return card;
 }
 
-function renderMessages() {
+function getVisibleMessages() {
   const query = $('search').value.trim().toLocaleLowerCase('de');
-  const messages = report.messages.filter((mail) => {
+  return report.messages.filter((mail) => {
     const suggestions = mail.review?.labels || mail.suggestions || {};
     const matchesFilter = filter === 'all' || (filter === 'review' && needsReview(mail)) ||
       (filter === 'unreviewed' && !mail.review) ||
+      (filter === 'uncertain' && isUncertain(mail)) ||
       (filter === 'rechnung' && suggestions.inhalt === 'rechnung') ||
       (filter === 'werbung' && suggestions.inhalt === 'werbung') ||
       (filter === 'wichtig' && suggestions.wichtig === 'ja') ||
@@ -299,11 +349,19 @@ function renderMessages() {
     const haystack = [mail.subject, mail.sender, mail.excerpt, ...(mail.attachment_names || [])].join(' ').toLocaleLowerCase('de');
     return matchesFilter && haystack.includes(query);
   });
+}
+
+function renderMessages() {
+  const messages = getVisibleMessages();
+  if (messages.length > 0 && !messages.some((m) => m.message_id === selectedMailId)) {
+    selectedMailId = messages[0].message_id;
+  }
   $('messages').replaceChildren(...messages.map(renderMail));
   $('editing-note').hidden = !editing;
   $('messages').setAttribute('aria-busy', 'false');
   $('visible-count').textContent = String(messages.length);
   $('empty').hidden = messages.length > 0;
+  const query = $('search').value.trim();
   const filtered = filter !== 'all' || Boolean(query);
   const nextBatchEmpty = reportLoaded && report.batch_mode === 'next' && report.messages.length === 0;
   $('empty-heading').textContent = nextBatchEmpty ? 'Keine weiteren Mails im Posteingang' : filtered ? 'Keine passenden Nachrichten' : reportLoaded && report.created_utc ? 'Keine Nachrichten im Bericht' : 'Noch keine Auswertung';
@@ -333,6 +391,30 @@ function renderReport(data) {
   $('review-progress-text').textContent = `${reviewed} von ${report.messages.length} bewertet`;
   $('review-progress-detail').textContent = `${skipped} übersprungen · ${pending} unbewertet`;
   $('review-progress').max = Math.max(1, report.messages.length);
+  $('review-progress').value = reviewed + skipped;
+  $('training-count').textContent = `${training} ${training === 1 ? 'Trainingsbeispiel' : 'Trainingsbeispiele'} insgesamt`;
+  $('training-export').hidden = !training;
+  const trainSplit = $('training-export-train');
+  const valSplit = $('training-export-val');
+  if (trainSplit) trainSplit.hidden = !training;
+  if (valSplit) valSplit.hidden = !training;
+
+  const dist = report.summary.distribution;
+  const distEl = $('category-distribution');
+  if (dist && distEl) {
+    const pills = [];
+    const inhaltNames = { rechnung: 'Rechnungen', info: 'Info', werbung: 'Werbung', sonstiges: 'Sonstiges' };
+    for (const [k, name] of Object.entries(inhaltNames)) {
+      const count = dist.inhalt?.[k] ?? 0;
+      pills.push(element('span', 'dist-pill', `${name}: ${count}`));
+    }
+    pills.push(element('span', 'dist-pill', `Wichtig: ${dist.wichtig?.ja ?? 0}`));
+    pills.push(element('span', 'dist-pill', `Spam: ${dist.spamverdacht?.ja ?? 0}`));
+    distEl.replaceChildren(...pills);
+    distEl.hidden = !training;
+  } else if (distEl) {
+    distEl.hidden = true;
+  }
   $('review-progress').value = reviewed + skipped;
   $('training-count').textContent = `${training} ${training === 1 ? 'Trainingsbeispiel' : 'Trainingsbeispiele'} insgesamt`;
   $('training-export').hidden = !training;
@@ -428,4 +510,63 @@ $('logout').addEventListener('click', async () => {
     $('logout').disabled = false;
   }
 });
+
+document.addEventListener('keydown', (event) => {
+  if (leaving || saving) return;
+  const tag = document.activeElement?.tagName;
+  if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return;
+  const isInteractive = Boolean(
+    document.activeElement?.closest
+      ? document.activeElement.closest('button, a, summary')
+      : ['BUTTON', 'A', 'SUMMARY'].includes(tag)
+  );
+  if (isInteractive && (event.key === 'Enter' || event.key === ' ')) return;
+  if (editing) {
+    if (event.key === 'Escape') {
+      editing = null;
+      renderMessages();
+      renderStatus();
+    }
+    return;
+  }
+  const currentFiltered = getVisibleMessages();
+  if (!currentFiltered.length) return;
+  const currentIndex = currentFiltered.findIndex((m) => m.message_id === selectedMailId);
+  const activeMail = currentIndex >= 0 ? currentFiltered[currentIndex] : currentFiltered[0];
+
+  if (event.key === 'j' || event.key === 'J' || event.key === 'ArrowDown') {
+    event.preventDefault();
+    const nextIndex = Math.min(currentFiltered.length - 1, (currentIndex >= 0 ? currentIndex : 0) + 1);
+    selectedMailId = currentFiltered[nextIndex].message_id;
+    renderMessages();
+    document.getElementById(`card-${selectedMailId}`)?.scrollIntoView?.({ block: 'nearest' });
+  } else if (event.key === 'k' || event.key === 'K' || event.key === 'ArrowUp') {
+    event.preventDefault();
+    const prevIndex = Math.max(0, (currentIndex >= 0 ? currentIndex : 0) - 1);
+    selectedMailId = currentFiltered[prevIndex].message_id;
+    renderMessages();
+    document.getElementById(`card-${selectedMailId}`)?.scrollIntoView?.({ block: 'nearest' });
+  } else if (event.key === '1' || event.key === 'Enter') {
+    if (activeMail && activeMail.training_ready && activeMail.status !== 'error') {
+      event.preventDefault();
+      saveFeedback(activeMail, 'accepted');
+    }
+  } else if (event.key === '2' || event.key === 'c' || event.key === 'C') {
+    if (activeMail && activeMail.training_ready) {
+      event.preventDefault();
+      startCorrection(activeMail);
+    }
+  } else if (event.key === '3' || event.key === 's' || event.key === 'S') {
+    if (activeMail && report.report_id) {
+      event.preventDefault();
+      saveFeedback(activeMail, 'skipped');
+    }
+  } else if (event.key === ' ') {
+    event.preventDefault();
+    const cardEl = document.getElementById(`card-${selectedMailId}`);
+    const details = cardEl?.querySelector?.('.input-details');
+    if (details) details.open = !details.open;
+  }
+});
+
 refreshStatus();

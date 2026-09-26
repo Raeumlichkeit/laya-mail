@@ -7,11 +7,14 @@ Lokale Weboberfläche zum Sortieren von Gmail-Nachrichten mit [Laya](https://git
 - Pro Durchlauf 1–100 Mails aus dem Posteingang laden; neue Stapel überspringen bereits angezeigte Nachrichten.
 - Inhalt: **Rechnung**, **Allgemeine Information**, **Werbung**, **Sonstiges**.
 - **Wichtig** und **Spamverdacht** werden unabhängig davon bewertet.
-- Vorschläge bestätigen, korrigieren oder überspringen; Bewertungen bleiben über Durchläufe hinweg gespeichert.
-- Bestätigte Beispiele als JSONL für späteres Training exportieren.
+- **Speed-Annotation & Tastaturkürzel**: Schnelles Bewerten mit `1` (Stimmt), `2` (Korrigieren), `3` (Überspringen) und `J`/`K` zur Navigation.
+- **Active Learning**: Eigener Filter für „Wackelkandidaten“ (knappe Modellentscheidungen) zum gezielten Anlernen an Grenzfällen.
+- **Signalwort-Hervorhebung**: Automatische Markierung von Signalbegriffen (Rechnungsbegriffe, Dringlichkeit, Phishing/Spam) im Mailtext.
+- **Datensatz-Verteilung & Split-Export**: Visuelle Klassen-Balance im Dashboard und deterministischer Export für Training (80%) und Validierung (20%).
+- **Lokale Fine-Tuning-Pipeline**: Skripte für GPU-Training (`gpu/train_laya.py`) und Modell-Evaluation (`gpu/evaluate_model.py`) auf dem Windows-PC.
 - GPU vor jedem Stapel automatisch auswählen; bei nicht verfügbarem GPU-Dienst CPU verwenden.
 
-Gmail wird ausschließlich mit `gmail.readonly` gelesen. Das Programm verändert keine Gmail-Labels, versendet und löscht keine E-Mails. Bewertungen sammeln Trainingsbeispiele; sie lösen **noch kein Fine-Tuning** aus. Anhänge und verlinkte Seiten werden nicht gelesen. Modell-Scores sind keine gemessenen Zuverlässigkeitsquoten.
+Gmail wird ausschließlich mit `gmail.readonly` gelesen. Das Programm verändert keine Gmail-Labels, versendet und löscht keine E-Mails. Anhänge und verlinkte Seiten werden nicht gelesen. Modell-Scores sind keine gemessenen Zuverlässigkeitsquoten.
 
 ## Aufbau
 

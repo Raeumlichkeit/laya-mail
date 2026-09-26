@@ -73,7 +73,7 @@ class Laya:
         assert url == "http://127.0.0.1:8000/v1/systemone"
         assert kwargs["allow_redirects"] is False
         assert kwargs["json"]["model"] == "multilingual"
-        assert len(kwargs["json"]["state"]) <= 2000
+        assert len(kwargs["json"]["state"]) <= pilot.STATE_CHARS
         assert "SECRET" not in kwargs["json"]["state"]
         if self.fail:
             return Response({"routing": {"model": "multilingual"}, "answers": {}})
@@ -292,7 +292,7 @@ class PilotCheck(unittest.TestCase):
         self.assertTrue(row["truncated"])
         self.assertEqual(row["model_input"], laya.calls[0]["json"])
         state = row["model_input"]["state"]
-        self.assertLessEqual(len(state), 2000)
+        self.assertLessEqual(len(state), pilot.STATE_CHARS)
         self.assertIn(accents, state)
         self.assertIn(prefix.strip(), state)
         self.assertIn(suffix, state)
@@ -300,6 +300,36 @@ class PilotCheck(unittest.TestCase):
         self.assertNotIn("preheader", state)
         self.assertFalse(any(char in state for char in "\u034f\u200b\ufeff\u00ad"))
         self.assertNotIn("suggestions", row)
+
+    def test_strip_boilerplate_preservation_and_truncation_reporting(self):
+        # 1. 'keine weiteren' alone must NOT be stripped
+        t1 = "Bitte pruefen Sie die Unterlagen. Wenn Sie keine weiteren Fragen haben, ist alles in Ordnung."
+        self.assertEqual(pilot.strip_boilerplate(t1), t1)
+
+        # 2. Reply requests or deadlines in tail after 40% threshold must be preserved
+        t2 = "Projektupdate fuer Oktober. " * 5 + "Wenn Sie diesen Newsletter nicht mehr erhalten moechten, bitte antworten Sie bis Freitag."
+        self.assertEqual(pilot.strip_boilerplate(t2), t2)
+
+        # 3. Legitimate boilerplate should be stripped
+        prefix = "Unsere Herbstangebote sind da und gelten bis Ende des Monats. " * 3
+        footer = "Wenn Sie diesen Newsletter nicht mehr erhalten moechten, klicken Sie hier zum Abmelden."
+        t3 = prefix + footer
+        stripped = pilot.strip_boilerplate(t3)
+        self.assertLess(len(stripped), len(t3))
+        self.assertEqual(stripped, prefix.rstrip())
+
+        # 4. Truncation reporting: when clean_text != text, pilot marks truncated=True even under BODY_CHARS
+        message = {"payload": {
+            "mimeType": "text/plain",
+            "headers": [{"name": "Subject", "value": "Newsletter"}, {"name": "From", "value": "shop@example.invalid"}],
+            "body": {"data": encoded(t3)},
+        }}
+        laya = Laya(fail=False)
+        report = pilot.run_pilot(Gmail(count=1, message=message), laya, "test@gmail.com",
+                                 "http://127.0.0.1:8000/v1/systemone", "FAKE_KEY")
+        row = report["messages"][0]
+        self.assertTrue(row["truncated"])
+        self.assertIn("[Text oder Metadaten gekuerzt]", row["model_input"]["state"])
 
 
 if __name__ == "__main__":

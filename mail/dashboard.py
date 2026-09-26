@@ -155,9 +155,20 @@ class Dashboard:
             elif item:
                 row["review_reasons"].append("Die frühere Bewertung gilt für eine andere Texteingabe; bitte erneut prüfen.")
                 row["needs_review"] = True
+        distribution = {"inhalt": {k: 0 for k in sorted(LABELS["inhalt"])},
+                        "wichtig": {k: 0 for k in sorted(LABELS["wichtig"])},
+                        "spamverdacht": {k: 0 for k in sorted(LABELS["spamverdacht"])}}
+        for item in self.feedback["items"].values():
+            if training_eligible(item):
+                labels = item.get("labels") or {}
+                for cat in LABELS:
+                    val = labels.get(cat)
+                    if val in distribution[cat]:
+                        distribution[cat][val] += 1
         report["summary"] = {"reviewed": reviewed, "skipped": skipped,
                              "pending": len(report["messages"]) - reviewed - skipped,
-                             "training_examples": sum(training_eligible(item) for item in self.feedback["items"].values())}
+                             "training_examples": sum(training_eligible(item) for item in self.feedback["items"].values()),
+                             "distribution": distribution}
         return report
 
     def save_feedback(self, data):
@@ -199,11 +210,16 @@ class Dashboard:
             self.feedback = pending
             return self.review_report()
 
-    def training_export(self):
+    def training_export(self, split=None):
         with self.lock:
             examples = []
             for message_id, item in self.feedback["items"].items():
                 if not training_eligible(item):
+                    continue
+                # Deterministic train/val assignment: 80% train, 20% val
+                h = int(hashlib.sha256(message_id.encode()).hexdigest()[:8], 16)
+                item_split = "val" if (h % 100) < 20 else "train"
+                if split and split in ("train", "val") and item_split != split:
                     continue
                 payload = item["model_input"]
                 gold = {name: {"type": "choice", "probabilities": {
@@ -212,6 +228,7 @@ class Dashboard:
                 metadata = {name: item.get(name) for name in ("snapshot_id", "input_version", "source_report_id",
                             "updated_utc", "action", "original_suggestions", "truncated", "content_omitted", "attachment_names")}
                 metadata["message_id"] = message_id
+                metadata["split"] = item_split
                 examples.append(json.dumps({**payload, "gold": gold, "metadata": metadata}, ensure_ascii=False))
             return ("\n".join(examples) + ("\n" if examples else "")).encode()
 
@@ -420,7 +437,12 @@ class Handler(BaseHTTPRequestHandler):
                 report = self.app.review_report()
             self.json(200, report)
         elif path == "/api/training-export":
-            self.respond(200, self.app.training_export(), "application/x-ndjson; charset=utf-8", download="laya-mail-training.jsonl")
+            query = parse_qs(urlsplit(self.path).query)
+            split = query.get("split", [None])[0]
+            if split not in {"train", "val"}:
+                split = None
+            filename = f"laya-mail-{split}.jsonl" if split else "laya-mail-training.jsonl"
+            self.respond(200, self.app.training_export(split=split), "application/x-ndjson; charset=utf-8", download=filename)
         elif path in {"/", "/app.js", "/style.css"}:
             filename, kind = {"/": ("index.html", "text/html"), "/app.js": ("app.js", "text/javascript"), "/style.css": ("style.css", "text/css")}[path]
             self.respond(200, (Path(__file__).parent / "web" / filename).read_bytes(), kind + "; charset=utf-8")

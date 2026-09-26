@@ -30,8 +30,8 @@ import requests
 SCOPE = "https://www.googleapis.com/auth/gmail.readonly"
 GMAIL = "https://gmail.googleapis.com/gmail/v1/users/me"
 LIMIT = 20
-BODY_CHARS = 1800
-STATE_CHARS = 2000
+BODY_CHARS = 2500
+STATE_CHARS = 2800
 INPUT_VERSION = "mail-v2"
 QUESTIONS = {
     "inhalt": {
@@ -71,6 +71,26 @@ def clean(text):
     text = re.sub(r"<!--.*?-->", " ", text, flags=re.DOTALL)
     text = text.translate(str.maketrans("", "", "\x00\u034f\u200b\ufeff\u00ad"))
     return " ".join(word for word in text.split() if word.strip("\u200c\u200d"))
+
+
+REPLY_OR_DEADLINE_PATTERN = re.compile(
+    r"(?i)\b(?:antwort(?:en|ung)?|r(?:ü|ue)ckmeldung|frist|termin|deadline|f(?:ä|ae)llig|fälligkeit|faelligkeit|bis\s+(?:zum|\d|spätestens|spaetestens)|zahlen|bezahlen|überweisen|ueberweisen)\b"
+)
+FOOTER_PATTERNS = [
+    r"(?i)\s*(?:(?:[-_]{3,}\s*)?(?:wenn sie (?:diesen newsletter|diese e-mail|keine weiteren (?:e-mails?|nachrichten|mitteilungen|newsletter))(?: von uns)? (?:nicht mehr )?(?:erhalten|bekommen|wünschen|moechten|möchten)|um sich (?:von diesem newsletter|von dieser liste|hier)? abzumelden|hier abmelden|klicken sie hier,? um sich abzumelden|to unsubscribe|click here to unsubscribe|manage your email preferences|sie erhalten diese e-mail, weil)).*$",
+    r"(?i)\s*(?:diese e-mail enth(?:ä|ae)lt vertrauliche|this email and any attachments are confidential).*$",
+]
+
+
+def strip_boilerplate(text):
+    for pattern in FOOTER_PATTERNS:
+        m = re.search(pattern, text)
+        if m and m.start() > len(text) * 0.4:
+            tail = text[m.start():]
+            if REPLY_OR_DEADLINE_PATTERN.search(tail):
+                continue
+            text = text[:m.start()].rstrip()
+    return text
 
 
 def shorten_middle(text, limit):
@@ -291,9 +311,14 @@ def run_pilot(gmail_session, laya_session, expected_account, laya_url, key, prog
             sender = clean(str(make_header(decode_header(headers.get("from", "")))))
             text, attachments, source, omitted, capped = mail_text(message)
             attachment_names = [name[:200] for name in attachments[:50]]
-            body, body_trimmed = shorten_middle(text, BODY_CHARS)
+            clean_text = strip_boilerplate(text)
+            boilerplate_trimmed = clean_text != text
+            body, body_trimmed = shorten_middle(clean_text, BODY_CHARS)
             state = f"Absender: {sender[:200]}\nBetreff: {subject[:300]}\nAnhangnamen (Inhalt nicht gelesen): {', '.join(attachment_names)[:300]}\nE-Mail-Text: {body}"
-            trimmed = capped or body_trimmed or len(subject) > 300 or len(sender) > 200 or len(', '.join(attachments)) > 300 or len(attachments) > 50 or any(len(name) > 200 for name in attachments)
+            trimmed = (capped or body_trimmed or boilerplate_trimmed
+                       or len(subject) > 300 or len(sender) > 200
+                       or len(', '.join(attachments)) > 300 or len(attachments) > 50
+                       or any(len(name) > 200 for name in attachments))
             if trimmed:
                 state += "\n[Text oder Metadaten gekuerzt]"
             row.update({
