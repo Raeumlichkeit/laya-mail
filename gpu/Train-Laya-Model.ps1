@@ -123,6 +123,14 @@ if ($wasRunning) {
     if (Test-Path $stopScript) { & $stopScript }
     Start-Sleep -Seconds 1
     if (Test-Path $startScript) { & $startScript }
+    Write-Host "Warte kurz auf CUDA-Initialisierung..." -ForegroundColor Gray
+    for ($i = 0; $i -lt 15; $i++) {
+        Start-Sleep -Seconds 1
+        try {
+            $h = Invoke-RestMethod -Uri 'http://192.168.50.20:8002/health' -TimeoutSec 1
+            if ($h.status -eq 'ok' -and $h.device -eq 'cuda') { break }
+        } catch {}
+    }
     Write-Host "GPU-Dienst laeuft jetzt mit dem neu trainierten Modell." -ForegroundColor Green
 } else {
     Write-Host "GPU-Dienst ist derzeit gestoppt (wird beim Klick auf 'Start GPU' automatisch mit dem neuen Modell gestartet)." -ForegroundColor Gray
