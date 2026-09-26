@@ -21,6 +21,13 @@ import requests
 
 from pilot_gmail import save_report
 
+try:
+    from accounts import AccountManager, AccountError
+    from watcher import LiveWatcher
+except ImportError:
+    from mail.accounts import AccountManager, AccountError
+    from mail.watcher import LiveWatcher
+
 LABELS = {"inhalt": {"rechnung", "info", "werbung", "sonstiges"},
           "wichtig": {"ja", "nein"}, "spamverdacht": {"ja", "nein"}}
 
@@ -132,6 +139,102 @@ class Dashboard:
                                   error="Der letzte Lesetest wurde durch einen Neustart unterbrochen.")
         save_report(state_file, self.state)
 
+        # Multi-Account Manager
+        self.accounts_mgr = AccountManager(self.directory, default_email=self.account)
+
+        # Persistent Settings
+        self.settings_file = self.directory / "settings.json"
+        self.settings = self._load_settings()
+
+        # Live Autopilot Watcher
+        key_path = self.directory / "gpu-api-key"
+        self.watcher = LiveWatcher(
+            directory=self.directory,
+            accounts_mgr=self.accounts_mgr,
+            laya_url=self.laya_url,
+            key_path=key_path,
+            get_settings_fn=self.get_settings,
+        )
+        self.watcher.start()
+
+    def _load_settings(self):
+        defaults = {"live_mode": False, "sort_inbox": False}
+        if self.settings_file.is_file():
+            try:
+                data = json.loads(self.settings_file.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    return {**defaults, **data}
+            except Exception:
+                pass
+        return defaults
+
+    def get_settings(self):
+        with self.lock:
+            s = dict(self.settings)
+        s["watcher"] = self.watcher.get_status()
+        return s
+
+    def update_settings(self, updates):
+        if not isinstance(updates, dict):
+            raise FeedbackError("Ungültige Einstellungen.")
+        with self.lock:
+            if "live_mode" in updates:
+                self.settings["live_mode"] = bool(updates["live_mode"])
+            if "sort_inbox" in updates:
+                self.settings["sort_inbox"] = bool(updates["sort_inbox"])
+            try:
+                save_report(self.settings_file, self.settings)
+            except OSError as err:
+                raise FeedbackError("Einstellungen konnten nicht gespeichert werden.", 503) from err
+        if self.settings.get("live_mode"):
+            self.watcher.trigger_now()
+        return self.get_settings()
+
+    def gpu_status(self):
+        config_path = self.directory / "gpu-backend.json"
+        url = self.laya_url
+        if config_path.is_file():
+            try:
+                cfg = json.loads(config_path.read_text(encoding="utf-8"))
+                if isinstance(cfg, dict) and cfg.get("url"):
+                    url = cfg["url"]
+            except Exception:
+                pass
+
+        endpoint = urlsplit(url)
+        t0 = time.time()
+        try:
+            with requests.Session() as probe:
+                probe.trust_env = False
+                health_url = endpoint._replace(path="/health").geturl()
+                resp = probe.get(health_url, timeout=2, allow_redirects=False)
+                latency_ms = round((time.time() - t0) * 1000, 1)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    device = data.get("device", "cpu")
+                    is_cuda = device in ("cuda", "cuda:0")
+                    return {
+                        "online": True,
+                        "device": device,
+                        "is_gpu": is_cuda,
+                        "model": "Laya multilingual (RTX 4070 Ti)" if is_cuda else "Laya multilingual (CPU)",
+                        "host": "Hauptrechner (NVIDIA RTX 4070 Ti)" if is_cuda else "Host",
+                        "latency_ms": latency_ms,
+                        "loaded": data.get("loaded", []),
+                    }
+        except Exception:
+            pass
+
+        return {
+            "online": False,
+            "device": "cpu",
+            "is_gpu": False,
+            "model": "Fallback Mac mini CPU",
+            "host": "Mac mini",
+            "latency_ms": None,
+            "loaded": [],
+        }
+
     def report(self):
         if self.report_path is None:
             return {"created_utc": None, "messages": [], "limitations": []}
@@ -242,7 +345,10 @@ class Dashboard:
                     state.update(processed=int(progress["processed"]), total=int(progress["total"]))
                 except (OSError, ValueError, KeyError, TypeError):
                     pass
-        state.update(read_only=True)
+        state.update(read_only=not self.settings.get("sort_inbox", False))
+        state["accounts"] = self.accounts_mgr.get_state()
+        state["settings"] = self.get_settings()
+        state["gpu"] = self.gpu_status()
         return state
 
     def select_backend(self):
@@ -312,38 +418,86 @@ class Dashboard:
     def run(self, mode="latest", limit=20):
         # No dashboard lock is held while probing the optional GPU host.
         laya_url, key_path, model, note = self.select_backend()
-        report_path = self.directory / ("pilot-" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ") + ".json")
-        command = [sys.executable, str(Path(__file__).with_name("pilot_gmail.py")),
-                   "--token", str(self.directory / "token.json"),
-                   "--laya-key-file", str(key_path),
-                   "--expected-account", self.account, "--laya-url", laya_url,
-                   "--output", str(report_path), "--progress", str(self.directory / "progress.json"),
-                   "--limit", str(limit)]
-        if mode == "next":
-            command.extend(["--exclude-ids-file", str(self.directory / "seen-message-ids.json")])
+        targets = self.accounts_mgr.get_active_targets()
+        if not targets:
+            targets = [{"email": self.account, "token_path": str(self.directory / "token.json")}]
+
+        sort_inbox = bool(self.settings.get("sort_inbox", False))
+        all_rows = []
         error = None
-        try:
-            with self.lock:
-                self.state.update(model=model, processing_note=note)
-                save_report(self.directory / "status.json", self.state)
-            result = subprocess.run(command, capture_output=True, text=True, timeout=max(900, limit * 20))
-            if result.returncode:
-                error = "Der Lesetest konnte nicht vollständig abgeschlossen werden. Details stehen, soweit vorhanden, bei den Nachrichten."
-        except (OSError, subprocess.TimeoutExpired):
-            error = "Der Lesetest wurde abgebrochen oder hat zu lange gedauert."
+        report_path = self.directory / ("pilot-" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ") + ".json")
+        per_account_limit = max(1, limit // len(targets)) if len(targets) > 1 else limit
+
+        for index, target in enumerate(targets):
+            email = target["email"]
+            token = target["token_path"]
+            account_report_path = report_path if len(targets) == 1 else (self.directory / f".pilot-tmp-{index}.json")
+            command = [
+                sys.executable, str(Path(__file__).with_name("pilot_gmail.py")),
+                "--token", str(token),
+                "--laya-key-file", str(key_path),
+                "--expected-account", email,
+                "--laya-url", laya_url,
+                "--output", str(account_report_path),
+                "--progress", str(self.directory / "progress.json"),
+                "--limit", str(per_account_limit),
+            ]
+            if mode == "next":
+                command.extend(["--exclude-ids-file", str(self.directory / "seen-message-ids.json")])
+            if sort_inbox:
+                command.append("--apply-labels")
+
+            try:
+                with self.lock:
+                    self.state.update(model=model, processing_note=note)
+                    save_report(self.directory / "status.json", self.state)
+                result = subprocess.run(command, capture_output=True, text=True, timeout=max(900, per_account_limit * 20))
+                if result.returncode:
+                    error = "Der Lesetest konnte nicht vollständig abgeschlossen werden. Details stehen, soweit vorhanden, bei den Nachrichten."
+                if len(targets) > 1 and account_report_path.exists():
+                    rep = json.loads(account_report_path.read_text(encoding="utf-8"))
+                    for msg in rep.get("messages", []):
+                        msg["account_email"] = email
+                        all_rows.append(msg)
+                    account_report_path.unlink(missing_ok=True)
+            except (OSError, subprocess.TimeoutExpired):
+                error = "Der Lesetest wurde abgebrochen oder hat zu lange gedauert."
+
         with self.lock:
             count = 0
-            if report_path.exists():
-                try:
-                    report = json.loads(report_path.read_text(encoding="utf-8"))
-                    count = len(report["messages"])
-                    report["processing_backend"] = model
-                    save_report(report_path, report)
-                    self.report_path = report_path
-                except (OSError, ValueError, KeyError, TypeError):
-                    error = "Der neue Auswertungsbericht konnte nicht gelesen werden."
+            if len(targets) == 1:
+                if report_path.exists():
+                    try:
+                        report = json.loads(report_path.read_text(encoding="utf-8"))
+                        count = len(report.get("messages", []))
+                        report["processing_backend"] = model
+                        save_report(report_path, report)
+                        self.report_path = report_path
+                    except (OSError, ValueError, KeyError, TypeError):
+                        error = "Der neue Auswertungsbericht konnte nicht gelesen werden."
+                else:
+                    error = error or "Es wurde kein Auswertungsbericht erstellt."
             else:
-                error = error or "Es wurde kein Auswertungsbericht erstellt."
+                combined_report = {
+                    "created_utc": now(),
+                    "input_version": "mail-v2",
+                    "batch_mode": mode,
+                    "status": "error" if any(r.get("status") == "error" for r in all_rows) else "complete",
+                    "read_only": not sort_inbox,
+                    "applied_labels": bool(sort_inbox),
+                    "limit": limit,
+                    "messages": all_rows,
+                    "processing_backend": model,
+                    "category_definitions": {
+                        "inhalt": {"type": "choice", "instructions": "Inhaltskategorie", "criteria": {}},
+                        "wichtig": {"type": "choice", "instructions": "Wichtigkeit", "criteria": {}},
+                        "spamverdacht": {"type": "choice", "instructions": "Spamverdacht", "criteria": {}},
+                    }
+                }
+                save_report(report_path, combined_report)
+                self.report_path = report_path
+                count = len(all_rows)
+
             self.state.update(phase="error" if error else "complete", processed=count,
                               total=count, finished_at=now(), error=error)
             try:
@@ -432,6 +586,12 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/api/status":
             self.json(200, self.app.status())
+        elif path == "/api/gpu-status":
+            self.json(200, self.app.gpu_status())
+        elif path == "/api/accounts":
+            self.json(200, self.app.accounts_mgr.get_state())
+        elif path == "/api/settings":
+            self.json(200, self.app.get_settings())
         elif path == "/api/report":
             with self.app.lock:
                 report = self.app.review_report()
@@ -485,6 +645,46 @@ class Handler(BaseHTTPRequestHandler):
                 self.json(error.status, {"error": str(error)})
             except OSError:
                 self.json(503, {"error": "Die Bewertung konnte nicht gespeichert werden. Bitte erneut versuchen."})
+        elif path == "/api/settings":
+            try:
+                value = json.loads(data or b"{}")
+                self.json(200, self.app.update_settings(value))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                self.json(400, {"error": "Die Einstellungen sind kein gültiges JSON."})
+            except FeedbackError as error:
+                self.json(error.status, {"error": str(error)})
+        elif path == "/api/accounts/select":
+            try:
+                value = json.loads(data or b"{}")
+                self.json(200, self.app.accounts_mgr.select(value.get("selected", "all")))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                self.json(400, {"error": "Ungültiges JSON."})
+            except AccountError as error:
+                self.json(error.status, {"error": str(error)})
+        elif path == "/api/accounts/add":
+            try:
+                value = json.loads(data or b"{}")
+                self.json(200, self.app.accounts_mgr.add_account(value.get("email")))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                self.json(400, {"error": "Ungültiges JSON."})
+            except AccountError as error:
+                self.json(error.status, {"error": str(error)})
+        elif path == "/api/accounts/toggle":
+            try:
+                value = json.loads(data or b"{}")
+                self.json(200, self.app.accounts_mgr.toggle_account(value.get("id"), value.get("enabled")))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                self.json(400, {"error": "Ungültiges JSON."})
+            except AccountError as error:
+                self.json(error.status, {"error": str(error)})
+        elif path == "/api/accounts/remove":
+            try:
+                value = json.loads(data or b"{}")
+                self.json(200, self.app.accounts_mgr.remove_account(value.get("id")))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                self.json(400, {"error": "Ungültiges JSON."})
+            except AccountError as error:
+                self.json(error.status, {"error": str(error)})
         elif path == "/api/run":
             try:
                 value = json.loads(data or b"{}")

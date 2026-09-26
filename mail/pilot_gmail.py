@@ -27,7 +27,9 @@ from google.oauth2.credentials import Credentials
 import requests
 
 
-SCOPE = "https://www.googleapis.com/auth/gmail.readonly"
+READONLY_SCOPE = "https://www.googleapis.com/auth/gmail.readonly"
+MODIFY_SCOPE = "https://www.googleapis.com/auth/gmail.modify"
+SCOPE = READONLY_SCOPE
 GMAIL = "https://gmail.googleapis.com/gmail/v1/users/me"
 LIMIT = 20
 BODY_CHARS = 2500
@@ -281,12 +283,23 @@ def classify(session, url, key, payload):
         raise PilotError("laya_response_invalid") from None
 
 
-def run_pilot(gmail_session, laya_session, expected_account, laya_url, key, progress=None, exclude_ids=None, limit=LIMIT):
+def run_pilot(gmail_session, laya_session, expected_account, laya_url, key, progress=None, exclude_ids=None, limit=LIMIT, apply_labels_mode=False):
     if type(limit) is not int or not 1 <= limit <= 100:
         raise PilotError("limit_invalid")
     profile = gmail_get(gmail_session, "/profile")
     if str(profile.get("emailAddress", "")).casefold() != expected_account.casefold():
         raise PilotError("account_mismatch")
+    label_cache = {}
+    if apply_labels_mode:
+        try:
+            try:
+                from labeler import get_or_create_labels, apply_labels
+            except ImportError:
+                from mail.labeler import get_or_create_labels, apply_labels
+            label_cache = get_or_create_labels(gmail_session)
+        except Exception as err:
+            logging.warning("Label-Initialisierung uebersprungen: %s", err)
+            label_cache = {}
     if exclude_ids is None:
         listing = gmail_get(gmail_session, "/messages", labelIds="INBOX", maxResults=limit, includeSpamTrash="false")
         entries = listing.get("messages", [])
@@ -330,8 +343,16 @@ def run_pilot(gmail_session, laya_session, expected_account, laya_url, key, prog
             row["truncated"] = trimmed or request_trimmed
             row["model_input"] = payload
             scores, tokens = classify(laya_session, laya_url, key, payload)
-            row.update({"status": "suggestion", "suggestions": {name: value["choice"] for name, value in scores.items()},
+            suggestions = {name: value["choice"] for name, value in scores.items()}
+            row.update({"status": "suggestion", "suggestions": suggestions,
                         "raw_scores": scores, "input_tokens": tokens})
+            if apply_labels_mode and label_cache:
+                try:
+                    applied = apply_labels(gmail_session, message_id, suggestions, label_cache, archive=False)
+                    row["applied_labels"] = applied
+                except Exception as err:
+                    logging.warning("Postfach-Sortierung fuer Nachricht %s fehlgeschlagen: %s", message_id, err)
+                    row["label_error"] = str(err)
         except PilotError as error:
             row["error"] = str(error)
         except requests.RequestException:
@@ -346,7 +367,7 @@ def run_pilot(gmail_session, laya_session, expected_account, laya_url, key, prog
         "input_version": INPUT_VERSION,
         "batch_mode": "latest" if exclude_ids is None else "next",
         "status": "error" if any(row["status"] == "error" for row in rows) else "complete",
-        "read_only": True, "limit": limit, "messages": rows, "category_definitions": QUESTIONS,
+        "read_only": not apply_labels_mode, "applied_labels": bool(apply_labels_mode), "limit": limit, "messages": rows, "category_definitions": QUESTIONS,
         "limitations": ["Vorschlaege zur manuellen Pruefung; kein Qualitaetsnachweis.",
                         "Rohscores sind keine gemessenen Zuverlaessigkeitsquoten.",
                         "Anhanginhalte und verlinkte Seiten werden nicht gelesen.",
@@ -379,6 +400,7 @@ def main(argv=None):
     parser.add_argument("--limit", type=int, default=LIMIT, help="Number of messages to process, 1-100 (default 20)")
     parser.add_argument("--expected-account", required=True)
     parser.add_argument("--laya-url", default="http://127.0.0.1:8000/v1/systemone")
+    parser.add_argument("--apply-labels", action="store_true", help="Apply classification labels in Gmail mailbox")
     args = parser.parse_args(argv)
     logging.disable(logging.CRITICAL)
     try:
@@ -405,7 +427,8 @@ def main(argv=None):
         if endpoint.scheme not in {"http", "https"} or not (address.is_loopback or address in ipaddress.ip_network("10.0.0.0/8") or address in ipaddress.ip_network("172.16.0.0/12") or address in ipaddress.ip_network("192.168.0.0/16")) or endpoint.username or endpoint.password or endpoint.query or endpoint.fragment or endpoint.path != "/v1/systemone":
             raise PilotError("laya_url_must_be_local")
         credentials = Credentials.from_authorized_user_file(str(args.token))
-        if set(credentials.scopes or []) != {SCOPE}:
+        scopes = set(credentials.scopes or [])
+        if not (scopes == {SCOPE} or (args.apply_labels and MODIFY_SCOPE in scopes) or (MODIFY_SCOPE in scopes and READONLY_SCOPE in scopes)):
             raise PilotError("readonly_token_required")
         key = args.laya_key_file.read_text().strip()
         if not key:
@@ -415,11 +438,12 @@ def main(argv=None):
             progress = None if args.progress is None else lambda processed, total: save_report(
                 args.progress, {"processed": processed, "total": total}
             )
-            report = run_pilot(gmail_session, laya_session, args.expected_account.strip(), args.laya_url, key, progress, exclude_ids, args.limit)
+            report = run_pilot(gmail_session, laya_session, args.expected_account.strip(), args.laya_url, key, progress, exclude_ids, args.limit, apply_labels_mode=args.apply_labels)
         save_report(args.output, report)
         count = sum(row["status"] == "suggestion" for row in report["messages"])
         errors = len(report["messages"]) - count
-        print(f"Privater Bericht gespeichert: {count} Vorschlaege, {errors} Fehler. Postfach unveraendert.")
+        mode_text = "Postfach mit Labels aktualisiert." if args.apply_labels else "Postfach unveraendert."
+        print(f"Privater Bericht gespeichert: {count} Vorschlaege, {errors} Fehler. {mode_text}")
         return 1 if errors else 0
     except PilotError as error:
         print("Pilot fehlgeschlagen: " + str(error), file=sys.stderr)

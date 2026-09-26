@@ -12,7 +12,23 @@
   <header class="site-header">
     <div class="header-inner">
       <a class="brand" href="/" aria-label="Laya Mail Übersicht"><span class="brand-mark" aria-hidden="true">L</span><span>Laya <span class="brand-light">Mail</span></span></a>
-      <div class="header-actions"><span class="readonly-badge"><span aria-hidden="true">◈</span> Gmail nur lesen</span><button id="logout" class="text-button" type="button">Abmelden</button></div>
+      <div class="header-actions">
+        <!-- GPU Status Badge -->
+        <div id="gpu-badge" class="gpu-badge gpu-badge-probing" role="status" title="GPU-Verbindung wird ermittelt">
+          <span class="gpu-dot" aria-hidden="true"></span>
+          <span id="gpu-text" class="gpu-text">GPU prüfen …</span>
+          <span id="gpu-ping" class="gpu-ping" hidden></span>
+        </div>
+        <!-- Account Dropdown -->
+        <div class="account-select-wrap">
+          <span class="account-icon" aria-hidden="true">✉</span>
+          <select id="account-select" class="account-select" aria-label="E-Mail-Konto auswählen" title="Aktives Postfach auswählen">
+            <option value="all">Alle Postfächer (kombiniert)</option>
+          </select>
+        </div>
+        <span id="mode-badge" class="readonly-badge"><span aria-hidden="true">◈</span> <span id="mode-badge-text">Gmail nur lesen</span></span>
+        <button id="logout" class="text-button" type="button">Abmelden</button>
+      </div>
     </div>
   </header>
 
@@ -24,6 +40,33 @@
       <div class="status-main"><div class="status-symbol" id="status-symbol" aria-hidden="true"><span></span></div><div><p class="eyebrow">Lokale Auswertung</p><h2 id="status-heading">Verbindung wird hergestellt …</h2><p id="status-description" class="muted" role="status" aria-live="polite">Der aktuelle Stand wird geladen.</p><p id="processing-location" class="processing-location">Auswertung: Mac mini · CPU</p><p id="processing-note" class="processing-note" hidden></p></div></div>
       <div class="batch-actions"><label class="count-control" for="mail-limit"><span>Anzahl Mails</span><input id="mail-limit" type="number" min="1" max="100" step="1" value="20" inputmode="numeric" required aria-describedby="mail-limit-help" disabled></label><span id="mail-limit-help" class="count-help">1–100 · Größere Mengen dauern länger.</span><button id="run-next" class="primary-button" type="button" disabled><span aria-hidden="true">↗</span><span id="run-next-label">Nächste 20 Mails laden</span></button><button id="run" class="secondary-button" type="button" disabled><span id="run-label">20 Mails prüfen</span></button></div>
       <p class="batch-note">„Nächste Mails laden“ holt bisher nicht angezeigte Nachrichten aus dem Posteingang. Bewertungen bleiben erhalten.</p>
+      
+      <!-- Automation & Sorting Toggles -->
+      <div class="automation-controls">
+        <div class="toggle-cards">
+          <label class="toggle-card" for="toggle-live-mode">
+            <input type="checkbox" id="toggle-live-mode" class="toggle-input">
+            <span class="toggle-switch" aria-hidden="true"><span class="toggle-knob"></span></span>
+            <div class="toggle-info">
+              <strong class="toggle-title">⚡ Live-Modus (Autopilot)</strong>
+              <span class="toggle-desc">Prüft alle 3 Minuten neue Mails automatisch</span>
+            </div>
+          </label>
+          <label class="toggle-card" for="toggle-sort-inbox">
+            <input type="checkbox" id="toggle-sort-inbox" class="toggle-input">
+            <span class="toggle-switch" aria-hidden="true"><span class="toggle-knob"></span></span>
+            <div class="toggle-info">
+              <strong class="toggle-title">🏷️ Im Postfach sortieren</strong>
+              <span class="toggle-desc">Vergibt echte Gmail-Labels (Rechnung, Werbung etc.)</span>
+            </div>
+          </label>
+        </div>
+        <div id="live-activity" class="live-activity" hidden>
+          <span class="live-activity-dot" aria-hidden="true"></span>
+          <span id="live-activity-text" class="live-activity-text">Live-Watcher bereit</span>
+        </div>
+      </div>
+
       <div id="progress-wrap" class="progress-wrap" hidden><progress id="progress" max="20" value="0" aria-label="Fortschritt der Auswertung"></progress><p>Der bestehende Bericht bleibt während der Auswertung sichtbar.</p></div>
     </section>
 
@@ -54,7 +97,7 @@
     </section>
 
     <details id="limitations" class="limitations" hidden><summary>Hinweise zu dieser Auswertung</summary><ul id="limitations-list"></ul></details>
-    <footer><span><span class="local-dot" aria-hidden="true"></span> Dashboard und Daten: Mac mini</span><p>Vorschläge und Bewertungen werden lokal gespeichert. Gmail-Nachrichten und Labels bleiben unverändert.</p></footer>
+    <footer><span><span class="local-dot" aria-hidden="true"></span> Dashboard und Daten: Mac mini</span><p>Vorschläge und Bewertungen werden lokal gespeichert. Gmail-Nachrichten werden nicht gelöscht.</p></footer>
   </main>
 </body>
 </html>

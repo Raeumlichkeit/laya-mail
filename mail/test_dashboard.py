@@ -143,6 +143,58 @@ class DashboardCheck(unittest.TestCase):
                 server.server_close()
                 thread.join()
 
+    def test_gpu_accounts_and_settings_endpoints(self):
+        with tempfile.TemporaryDirectory() as folder:
+            directory = Path(folder)
+            key = "synthetic-test-key-not-a-real-credential"
+            (directory / "dashboard-key").write_text(key)
+            app = Dashboard(directory, "test@example.invalid", "http://127.0.0.1:8000/v1/systemone")
+            server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+            origin = "http://127.0.0.1:" + str(server.server_port)
+            server.RequestHandlerClass = partial(Handler, app=app, origin=origin)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                with requests.Session() as client:
+                    login = client.post(origin + "/login", data={"code": key}, headers={"Origin": origin}, allow_redirects=False)
+                    self.assertEqual(login.status_code, 303)
+                    headers = {"Origin": origin}
+
+                    gpu_res = client.get(origin + "/api/gpu-status", headers=headers)
+                    self.assertEqual(gpu_res.status_code, 200)
+                    self.assertIn("online", gpu_res.json())
+
+                    acc_res = client.get(origin + "/api/accounts", headers=headers)
+                    self.assertEqual(acc_res.status_code, 200)
+                    self.assertIn("accounts", acc_res.json())
+                    self.assertEqual(acc_res.json()["selected"], "all")
+
+                    add_res = client.post(origin + "/api/accounts/add", json={"email": "second@example.invalid"}, headers=headers)
+                    self.assertEqual(add_res.status_code, 200)
+                    self.assertTrue(any(a["email"] == "second@example.invalid" for a in add_res.json()["accounts"]))
+
+                    sel_res = client.post(origin + "/api/accounts/select", json={"selected": "second@example.invalid"}, headers=headers)
+                    self.assertEqual(sel_res.status_code, 200)
+                    self.assertEqual(sel_res.json()["selected"], "second@example.invalid")
+
+                    sett_res = client.get(origin + "/api/settings", headers=headers)
+                    self.assertEqual(sett_res.status_code, 200)
+                    self.assertFalse(sett_res.json()["live_mode"])
+                    self.assertFalse(sett_res.json()["sort_inbox"])
+
+                    upd_res = client.post(origin + "/api/settings", json={"live_mode": True, "sort_inbox": True}, headers=headers)
+                    self.assertEqual(upd_res.status_code, 200)
+                    self.assertTrue(upd_res.json()["live_mode"])
+                    self.assertTrue(upd_res.json()["sort_inbox"])
+
+                    status_res = client.get(origin + "/api/status", headers=headers).json()
+                    self.assertFalse(status_res["read_only"])
+                    self.assertTrue(status_res["settings"]["live_mode"])
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -18,7 +18,7 @@ while ($searchDir) {
     $searchDir = Split-Path $searchDir -Parent
 }
 if (-not $taskRoot) {
-    $taskRoot = 'C:\LayaWorkspace'
+    $taskRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 }
 
 $pythonPath = Join-Path $taskRoot 'work\laya-gpu-venv\Scripts\python.exe'
@@ -28,6 +28,10 @@ $evalScript = Join-Path $repoRoot 'gpu\evaluate_model.py'
 $baseModel = Join-Path $taskRoot 'work\laya-gpu\multilingual'
 $outputDir = Join-Path $repoRoot 'runtime\models\laya-mail-custom'
 $dashboardKeyPath = Join-Path $taskRoot 'work\gmail-private\dashboard-key'
+$dashboardUrl = if ($env:LAYA_DASHBOARD_URL) { $env:LAYA_DASHBOARD_URL } else {
+    $cfgPath = Join-Path $taskRoot 'work\gmail-private\dashboard-url.txt'
+    if (Test-Path $cfgPath) { (Get-Content $cfgPath -Raw).Trim() } else { 'http://127.0.0.1:8001' }
+}
 $dataDir = Join-Path $repoRoot 'runtime\training'
 New-Item -ItemType Directory -Path $dataDir -Force | Out-Null
 $trainData = Join-Path $dataDir 'laya-mail-train.jsonl'
@@ -40,7 +44,7 @@ import urllib.request, urllib.parse, http.cookiejar, pathlib, sys
 jar = http.cookiejar.CookieJar()
 op = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
 key = pathlib.Path(sys.argv[1]).read_text(encoding='utf-8').strip()
-origin = 'http://192.168.50.10:8001'
+origin = sys.argv[4].rstrip('/')
 try:
     login_data = urllib.parse.urlencode({'code': key}).encode()
     op.open(urllib.request.Request(origin + '/login', data=login_data, headers={'Origin': origin}), timeout=5)
@@ -58,7 +62,7 @@ except Exception as e:
 
 $exportScriptPath = Join-Path $env:TEMP 'laya_export_runner.py'
 Set-Content -Path $exportScriptPath -Value $exportPy -Encoding UTF8
-& $pythonPath $exportScriptPath $dashboardKeyPath $trainData $valData
+& $pythonPath $exportScriptPath $dashboardKeyPath $trainData $valData $dashboardUrl
 Remove-Item -Path $exportScriptPath -Force -ErrorAction SilentlyContinue
 
 # Fallback auf Projekt-Root falls runtime/training leer
@@ -114,7 +118,7 @@ $startScript = Join-Path $outputsDir 'Start-Laya-GPU.ps1'
 
 $wasRunning = $false
 try {
-    $status = Invoke-RestMethod -Uri 'http://192.168.50.20:8002/health' -TimeoutSec 2
+    $status = Invoke-RestMethod -Uri 'http://127.0.0.1:8002/health' -TimeoutSec 2
     if ($status.status -eq 'ok') { $wasRunning = $true }
 } catch {}
 
@@ -127,7 +131,7 @@ if ($wasRunning) {
     for ($i = 0; $i -lt 15; $i++) {
         Start-Sleep -Seconds 1
         try {
-            $h = Invoke-RestMethod -Uri 'http://192.168.50.20:8002/health' -TimeoutSec 1
+            $h = Invoke-RestMethod -Uri 'http://127.0.0.1:8002/health' -TimeoutSec 1
             if ($h.status -eq 'ok' -and $h.device -eq 'cuda') { break }
         } catch {}
     }

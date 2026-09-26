@@ -265,6 +265,14 @@ function renderMail(mail) {
   const identity = element('div');
   identity.append(element('h3', 'mail-subject', mail.subject || '(Ohne Betreff)'), element('p', 'mail-sender', mail.sender || 'Absender nicht verfügbar'));
   const labels = element('div', 'mail-labels');
+  if (mail.account_email) {
+    labels.append(element('span', 'label account-label', mail.account_email));
+  }
+  if (Array.isArray(mail.applied_labels) && mail.applied_labels.length) {
+    for (const applied of mail.applied_labels) {
+      labels.append(element('span', 'label label-applied', `🏷️ ${applied}`));
+    }
+  }
   const suggestions = mail.suggestions || {};
   if (mail.status === 'error') labels.append(label('Fehler', 'error'));
   else if (!suggestions.inhalt) labels.append(label('Nicht eingeordnet', ''));
@@ -427,6 +435,98 @@ function renderReport(data) {
   renderStatus();
 }
 
+function renderGpu(gpu) {
+  const badge = $('gpu-badge');
+  const text = $('gpu-text');
+  const ping = $('gpu-ping');
+  if (!badge || !text) return;
+  if (!gpu) {
+    badge.className = 'gpu-badge gpu-badge-probing';
+    text.textContent = 'GPU prüfen …';
+    if (ping) ping.hidden = true;
+    return;
+  }
+  if (gpu.online && gpu.is_gpu) {
+    badge.className = 'gpu-badge gpu-badge-online';
+    text.textContent = 'RTX 4070 Ti verbunden';
+    if (ping) {
+      ping.hidden = false;
+      ping.textContent = `${gpu.latency_ms ?? 12} ms`;
+    }
+    badge.title = `NVIDIA GeForce RTX 4070 Ti online · ${gpu.model || 'Laya multilingual'} · Latenz: ${gpu.latency_ms}ms`;
+  } else if (gpu.online && !gpu.is_gpu) {
+    badge.className = 'gpu-badge gpu-badge-cpu';
+    text.textContent = 'CPU aktiv';
+    if (ping) {
+      ping.hidden = false;
+      ping.textContent = `${gpu.latency_ms ?? 10} ms`;
+    }
+    badge.title = `Lokale CPU aktiv · Latenz: ${gpu.latency_ms}ms`;
+  } else {
+    badge.className = 'gpu-badge gpu-badge-offline';
+    text.textContent = 'GPU offline (Mac CPU Fallback)';
+    if (ping) ping.hidden = true;
+    badge.title = 'Hauptrechner (RTX 4070 Ti) nicht erreichbar · Fallback Mac mini CPU aktiv';
+  }
+}
+
+function renderAccounts(data) {
+  const select = $('account-select');
+  if (!select || !data || !Array.isArray(data.accounts)) return;
+  const currentVal = data.selected || 'all';
+  select.innerHTML = '';
+  const allOpt = document.createElement('option');
+  allOpt.value = 'all';
+  allOpt.textContent = `Alle Postfächer (${data.accounts.length})`;
+  select.append(allOpt);
+
+  for (const acc of data.accounts) {
+    const opt = document.createElement('option');
+    opt.value = acc.id;
+    opt.textContent = `${acc.email}${acc.token_exists ? '' : ' ⚠️'}`;
+    select.append(opt);
+  }
+  select.value = currentVal;
+}
+
+function renderSettings(settings) {
+  if (!settings) return;
+  const liveToggle = $('toggle-live-mode');
+  const sortToggle = $('toggle-sort-inbox');
+  const modeBadge = $('mode-badge');
+  const modeBadgeText = $('mode-badge-text');
+  const liveActivity = $('live-activity');
+  const liveActivityText = $('live-activity-text');
+
+  if (liveToggle) liveToggle.checked = Boolean(settings.live_mode);
+  if (sortToggle) sortToggle.checked = Boolean(settings.sort_inbox);
+
+  if (modeBadge && modeBadgeText) {
+    if (settings.sort_inbox) {
+      modeBadge.className = 'readonly-badge sort-active';
+      modeBadgeText.textContent = 'Gmail sortieren (Labels aktiv)';
+    } else {
+      modeBadge.className = 'readonly-badge';
+      modeBadgeText.textContent = 'Gmail nur lesen';
+    }
+  }
+
+  if (liveActivity && liveActivityText) {
+    if (settings.live_mode) {
+      liveActivity.hidden = false;
+      const watcher = settings.watcher;
+      const recent = watcher?.recent_activities?.[0];
+      if (recent) {
+        liveActivityText.textContent = `Live: ${recent.message}`;
+      } else {
+        liveActivityText.textContent = 'Live-Watcher aktiv · Prüft alle 3 Minuten';
+      }
+    } else {
+      liveActivity.hidden = true;
+    }
+  }
+}
+
 async function refreshStatus() {
   clearTimeout(pollTimer);
   try {
@@ -437,6 +537,9 @@ async function refreshStatus() {
     reportPending = reportPending || reportChanged || justFinished || feedbackChanged;
     status = next;
     renderStatus();
+    if (next.gpu) renderGpu(next.gpu);
+    if (next.accounts) renderAccounts(next.accounts);
+    if (next.settings) renderSettings(next.settings);
     if (reportPending && !editing && !saving) {
       const version = reportVersion;
       const updated = await api('/api/report');
@@ -498,6 +601,36 @@ async function startRun(mode) {
 $('run').addEventListener('click', () => startRun('latest'));
 $('run-next').addEventListener('click', () => startRun('next'));
 $('mail-limit').addEventListener('input', renderStatus);
+
+$('account-select')?.addEventListener('change', async (e) => {
+  try {
+    const res = await api('/api/accounts/select', 'POST', { selected: e.target.value });
+    renderAccounts(res);
+    await refreshStatus();
+  } catch (err) {
+    showError(`Konto-Auswahl fehlgeschlagen: ${err.message}`);
+  }
+});
+
+$('toggle-live-mode')?.addEventListener('change', async (e) => {
+  try {
+    const res = await api('/api/settings', 'POST', { live_mode: e.target.checked });
+    renderSettings(res);
+  } catch (err) {
+    e.target.checked = !e.target.checked;
+    showError(`Live-Modus konnte nicht geändert werden: ${err.message}`);
+  }
+});
+
+$('toggle-sort-inbox')?.addEventListener('change', async (e) => {
+  try {
+    const res = await api('/api/settings', 'POST', { sort_inbox: e.target.checked });
+    renderSettings(res);
+  } catch (err) {
+    e.target.checked = !e.target.checked;
+    showError(`Sortier-Einstellung konnte nicht geändert werden: ${err.message}`);
+  }
+});
 $('logout').addEventListener('click', async () => {
   $('logout').disabled = true;
   try {
