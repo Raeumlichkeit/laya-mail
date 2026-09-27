@@ -9,7 +9,7 @@ Lokale Weboberfläche zum Sortieren von Gmail-Nachrichten mit [Laya](https://git
 - **Wichtig** und **Spamverdacht** werden unabhängig davon bewertet.
 - **⚡ Live GPU-Statusanzeige**: Header-Badge zeigt in Echtzeit den Verbindungsstatus und die Latenz der NVIDIA-Grafikkarte (z. B. `RTX 4070 Ti verbunden · 3 ms`), mit automatischem Fallback auf CPU.
 - **✉️ Multi-Account-Modell**: Beliebig viele E-Mail-Adressen über `accounts.json` verwalten; Abfrage einzelner Postfächer oder aller Konten kombiniert direkt im Dashboard.
-- **🏷️ Postfach-Sortier-Toggle**: Optionales automatisches Zuweisen von Labels (`Rechnung`, `Werbung`, `Info`, `Wichtig`, `Spamverdacht`) im Gmail-Postfach – absolut nicht-destruktiv (Mails bleiben im Posteingang, kein Löschen/Archivieren).
+- **🏷️ Postfach-Sortier-Toggle**: Optionales automatisches Zuweisen von Labels (`Rechnung`, `Werbung`, `Info`, `Laya/Wichtig`, `Spamverdacht`) im Gmail-Postfach – absolut nicht-destruktiv (Mails bleiben im Posteingang, kein Löschen/Archivieren). `Laya/Wichtig` vermeidet die Kollision mit Gmails reserviertem Systemlabel „Wichtig“.
 - **🔄 Live-Modus (Autopilot)**: Prüft die ausgewählten aktiven Postfächer alle 3 Minuten in Stapeln von bis zu 10 Mails. Er nutzt denselben Ablauf, die GPU-Auswahl mit CPU-Fallback und die Ergebnisübersicht wie manuelle Durchläufe. Gmail-Labels werden nur bei eingeschalteter Postfach-Sortierung geändert; während eines laufenden Stapels wartet der nächste Live-Durchlauf.
 - **Speed-Annotation & Tastaturkürzel**: Schnelles Bewerten mit `1` (Stimmt), `2` (Korrigieren), `3` (Überspringen) und `J`/`K` zur Navigation.
 - **Active Learning**: Eigener Filter für „Wackelkandidaten“ (knappe Modellentscheidungen) zum gezielten Anlernen an Grenzfällen.

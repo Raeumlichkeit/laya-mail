@@ -63,7 +63,7 @@ class LabelerTests(unittest.TestCase):
         suggestions = {"inhalt": "rechnung", "wichtig": "ja", "spamverdacht": "nein"}
 
         applied = apply_labels(session, "msg_123", suggestions, self.cache, archive=False)
-        self.assertEqual(applied, ["Rechnung", "Wichtig"])
+        self.assertEqual(applied, ["Rechnung", "Laya/Wichtig"])
 
         session.post.assert_called_once()
         args, kwargs = session.post.call_args
@@ -161,6 +161,27 @@ class LabelerTests(unittest.TestCase):
         self.assertEqual(labels["info"], "new-info-id")
         self.assertNotIn("unrelated-id", labels.values())
         session.post.assert_called_once()
+
+    def test_importance_uses_custom_name_instead_of_reserved_system_label(self):
+        session = MagicMock()
+        session.get.return_value.status_code = 200
+        session.get.return_value.json.return_value = {"labels": [
+            {"name": "Wichtig", "id": "IMPORTANT", "type": "system"},
+            *[{"name": name, "id": self.cache[key]} for key, name in LABEL_MAP.items() if key != "wichtig"],
+        ]}
+
+        def create(url, json, **kwargs):
+            response = MagicMock()
+            response.status_code = 400 if json["name"] == "Wichtig" else 200
+            response.json.return_value = {"id": "custom-importance-id"}
+            return response
+
+        session.post.side_effect = create
+        labels = get_or_create_labels(session)
+        self.assertEqual(labels["wichtig"], "custom-importance-id")
+        self.assertNotIn("IMPORTANT", labels.values())
+        session.post.assert_called_once()
+        self.assertEqual(session.post.call_args.kwargs["json"]["name"], "Laya/Wichtig")
 
 
 if __name__ == "__main__":

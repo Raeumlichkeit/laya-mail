@@ -3,12 +3,12 @@ import requests
 
 GMAIL = "https://gmail.googleapis.com/gmail/v1/users/me"
 
-# User-approved label names without prefix
+# Gmail rejects its localized system-label name "Wichtig" as a custom label.
 LABEL_MAP = {
     "rechnung": "Rechnung",
     "werbung": "Werbung",
     "info": "Info",
-    "wichtig": "Wichtig",
+    "wichtig": "Laya/Wichtig",
     "spamverdacht": "Spamverdacht",
 }
 
