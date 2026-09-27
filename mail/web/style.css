@@ -78,3 +78,4 @@ mark.hl-security{background:#fce7f3;color:#9d174d;padding:1px 4px;border-radius:
 .action-sub-button:hover:enabled{background:#dcfce7;border-color:#86efac;color:#14532d}
 .action-sub-button:disabled{opacity:.5;cursor:not-allowed}
 
+.all-mail-action{flex:0 0 100%;display:flex;align-items:center;gap:18px;padding-top:17px;border-top:1px solid #e6e0f1}.all-mail-action .secondary-button{flex:0 0 auto;font-size:12px}.all-mail-action p{font-size:11px;line-height:1.65;color:var(--muted);margin:0}.stop-button{margin-top:13px;font-size:11px;min-height:34px;padding:8px 12px}.account-select:disabled{cursor:not-allowed;opacity:.6}@media(max-width:700px){.all-mail-action{align-items:flex-start;flex-direction:column;gap:10px}.all-mail-action .secondary-button{white-space:normal;text-align:left}}

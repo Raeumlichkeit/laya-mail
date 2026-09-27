@@ -1,4 +1,4 @@
-"""Read-only pilot: 1-100 inbox messages (default 20), local suggestions, no labels.
+"""Classify inbox messages locally, optionally applying approved Gmail labels.
 
 The output and progress files' existing parent directories must be private (0700 on Unix;
 restrict its ACL to the current user and SYSTEM on Windows).
@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from email.header import decode_header, make_header
 from email.message import Message
 from html.parser import HTMLParser
+import hashlib
 import ipaddress
 import json
 import logging
@@ -196,15 +197,19 @@ def valid_message_id(value):
     return isinstance(value, str) and re.fullmatch(r"[0-9a-fA-F]+", value) is not None
 
 
-def next_entries(session, exclude_ids, limit=LIMIT):
+def next_entries(session, exclude_ids, limit=LIMIT, should_stop=None):
     if not isinstance(exclude_ids, (set, frozenset)) or not all(valid_message_id(value) for value in exclude_ids):
         raise PilotError("exclude_ids_invalid")
     seen_ids = {value.lower() for value in exclude_ids}
     seen_tokens = set()
     selected = []
     params = {"labelIds": "INBOX", "maxResults": 100, "includeSpamTrash": "false"}
-    for _ in range(100):
+    pages = 0
+    while limit is None or pages < 100:
+        if should_stop is not None and should_stop():
+            return selected
         listing = gmail_get(session, "/messages", **params)
+        pages += 1
         entries = listing.get("messages", [])
         if not isinstance(entries, list):
             raise PilotError("gmail_response_invalid")
@@ -241,6 +246,43 @@ def load_excluded_ids(path):
     if not isinstance(values, list) or not all(valid_message_id(value) for value in values):
         raise PilotError("exclude_ids_file_invalid")
     return {value.lower() for value in values}
+
+
+def check_private_input(path, kind, optional=False):
+    if (not path.parent.is_dir() or path.is_symlink()
+            or ((not optional or path.exists()) and not path.is_file())):
+        raise PilotError(kind + "_file_invalid")
+    if os.name != "nt" and (path.parent.stat().st_mode & 0o077
+                             or path.exists() and path.stat().st_mode & 0o077):
+        raise PilotError(kind + "_file_not_private")
+
+
+def load_reviews(path):
+    check_private_input(path, "reviews")
+    try:
+        values = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError):
+        raise PilotError("reviews_file_invalid") from None
+    if (not isinstance(values, dict) or not all(valid_message_id(key) for key in values)
+            or len({key.lower() for key in values}) != len(values)):
+        raise PilotError("reviews_file_invalid")
+    return {key.lower(): value for key, value in values.items()}
+
+
+def matching_review(row, reviews):
+    item = reviews.get(row["message_id"].lower())
+    if not isinstance(item, dict) or item.get("action") not in ("accepted", "corrected"):
+        return None
+    labels = item.get("labels")
+    if (not isinstance(labels, dict) or set(labels) != set(QUESTIONS)
+            or any(not isinstance(labels[name], str) or labels[name] not in question["criteria"]
+                   for name, question in QUESTIONS.items())):
+        return None
+    encoded = json.dumps([row["message_id"], INPUT_VERSION, row["model_input"]],
+                         ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+    if item.get("snapshot_id") != hashlib.sha256(encoded).hexdigest():
+        return None
+    return dict(labels)
 
 
 def request_payload(state):
@@ -283,34 +325,61 @@ def classify(session, url, key, payload):
         raise PilotError("laya_response_invalid") from None
 
 
-def run_pilot(gmail_session, laya_session, expected_account, laya_url, key, progress=None, exclude_ids=None, limit=LIMIT, apply_labels_mode=False):
-    if type(limit) is not int or not 1 <= limit <= 100:
+def run_pilot(gmail_session, laya_session, expected_account, laya_url, key, progress=None, exclude_ids=None, limit=LIMIT, apply_labels_mode=False, all_inbox=False, should_stop=None, reviews=None):
+    if not all_inbox and (type(limit) is not int or not 1 <= limit <= 100):
         raise PilotError("limit_invalid")
+    if all_inbox and not apply_labels_mode:
+        raise PilotError("all_inbox_requires_apply_labels")
+    if all_inbox and exclude_ids is not None:
+        raise PilotError("all_inbox_excludes_not_allowed")
+    if reviews is not None and not isinstance(reviews, dict):
+        raise PilotError("reviews_invalid")
+    reviews = reviews or {}
+    stopped = False
+
+    def stop_requested():
+        nonlocal stopped
+        if not stopped and should_stop is not None and should_stop():
+            stopped = True
+        return stopped
+
     profile = gmail_get(gmail_session, "/profile")
     if str(profile.get("emailAddress", "")).casefold() != expected_account.casefold():
         raise PilotError("account_mismatch")
-    label_cache = {}
-    if apply_labels_mode:
+    def initialize_labels():
         try:
             try:
                 from labeler import get_or_create_labels, apply_labels
             except ImportError:
                 from mail.labeler import get_or_create_labels, apply_labels
-            label_cache = get_or_create_labels(gmail_session)
+            return get_or_create_labels(gmail_session), apply_labels
         except Exception:
             raise PilotError("label_initialization_failed") from None
-    if exclude_ids is None:
+
+    label_cache, apply_labels = {}, None
+    if apply_labels_mode and not all_inbox and not stop_requested():
+        label_cache, apply_labels = initialize_labels()
+    if stop_requested():
+        entries = []
+    elif all_inbox:
+        entries = next_entries(gmail_session, set(), limit=None, should_stop=stop_requested)
+    elif exclude_ids is None:
         listing = gmail_get(gmail_session, "/messages", labelIds="INBOX", maxResults=limit, includeSpamTrash="false")
         entries = listing.get("messages", [])
         if not isinstance(entries, list):
             raise PilotError("gmail_response_invalid")
         entries = entries[:limit]
     else:
-        entries = next_entries(gmail_session, exclude_ids, limit)
+        entries = next_entries(gmail_session, exclude_ids, limit, should_stop=stop_requested)
+    stop_requested()
     if progress is not None:
         progress(0, len(entries))
+    if apply_labels_mode and all_inbox and entries and not stop_requested():
+        label_cache, apply_labels = initialize_labels()
     rows = []
     for entry in entries:
+        if stop_requested():
+            break
         row = {"status": "error"}
         try:
             message_id = entry["id"]
@@ -348,7 +417,8 @@ def run_pilot(gmail_session, laya_session, expected_account, laya_url, key, prog
                         "raw_scores": scores, "input_tokens": tokens})
             if apply_labels_mode and label_cache:
                 try:
-                    applied = apply_labels(gmail_session, message_id, suggestions, label_cache, archive=False)
+                    effective = matching_review(row, reviews) or suggestions
+                    applied = apply_labels(gmail_session, message_id, effective, label_cache, archive=False)
                     row["applied_labels"] = applied
                 except Exception:
                     row["label_error"] = "Die Gmail-Labels konnten nicht aktualisiert werden."
@@ -361,13 +431,15 @@ def run_pilot(gmail_session, laya_session, expected_account, laya_url, key, prog
         rows.append(row)
         if progress is not None:
             progress(len(rows), len(entries))
+    stop_requested()
     return {
         "created_utc": datetime.now(timezone.utc).isoformat(),
         "input_version": INPUT_VERSION,
-        "batch_mode": "latest" if exclude_ids is None else "next",
-        "status": "error" if any(row["status"] == "error" or row.get("label_error") for row in rows) else "complete",
+        "batch_mode": "all" if all_inbox else "latest" if exclude_ids is None else "next",
+        "status": "error" if any(row["status"] == "error" or row.get("label_error") for row in rows) else "stopped" if stopped else "complete",
         "account_email": expected_account.casefold(),
-        "read_only": not apply_labels_mode, "applied_labels": bool(apply_labels_mode), "limit": limit, "messages": rows, "category_definitions": QUESTIONS,
+        "read_only": not apply_labels_mode, "applied_labels": bool(apply_labels_mode), "limit": None if all_inbox else limit,
+        "total": len(entries), "messages": rows, "category_definitions": QUESTIONS,
         "limitations": ["Vorschlaege zur manuellen Pruefung; kein Qualitaetsnachweis.",
                         "Rohscores sind keine gemessenen Zuverlaessigkeitsquoten.",
                         "Anhanginhalte und verlinkte Seiten werden nicht gelesen.",
@@ -401,10 +473,17 @@ def main(argv=None):
     parser.add_argument("--expected-account", required=True)
     parser.add_argument("--laya-url", default="http://127.0.0.1:8000/v1/systemone")
     parser.add_argument("--apply-labels", action="store_true", help="Apply classification labels in Gmail mailbox")
+    parser.add_argument("--all-inbox", action="store_true", help="Classify and label every inbox message, including previously seen messages")
+    parser.add_argument("--stop-file", type=Path, help="Stop when this private signal file exists; the pilot never writes it")
+    parser.add_argument("--reviews-file", type=Path, help="Private JSON reviews for this account, keyed by message ID")
     args = parser.parse_args(argv)
     logging.disable(logging.CRITICAL)
     try:
-        if not 1 <= args.limit <= 100:
+        if args.all_inbox and not args.apply_labels:
+            raise PilotError("all_inbox_requires_apply_labels")
+        if args.all_inbox and args.exclude_ids_file is not None:
+            raise PilotError("all_inbox_excludes_not_allowed")
+        if not args.all_inbox and not 1 <= args.limit <= 100:
             raise PilotError("limit_invalid")
         if "@" not in args.expected_account.strip():
             raise PilotError("expected_account_required")
@@ -413,12 +492,18 @@ def main(argv=None):
         if os.name != "nt" and args.output.parent.stat().st_mode & 0o077:
             raise PilotError("output_directory_not_private")
         exclude_ids = None if args.exclude_ids_file is None else load_excluded_ids(args.exclude_ids_file)
+        reviews = None if args.reviews_file is None else load_reviews(args.reviews_file)
+        if args.stop_file is not None:
+            check_private_input(args.stop_file, "stop", optional=True)
         if args.progress is not None:
             if (not args.progress.parent.is_dir() or args.progress.is_symlink()
                     or (args.progress.exists() and not args.progress.is_file())
                     or args.progress.resolve() in {args.token.resolve(), args.laya_key_file.resolve(), args.output.resolve()}):
                 raise PilotError("progress_destination_unavailable")
             if args.exclude_ids_file is not None and args.progress.resolve() == args.exclude_ids_file.resolve():
+                raise PilotError("progress_destination_unavailable")
+            if any(path is not None and args.progress.resolve() == path.resolve()
+                   for path in (args.stop_file, args.reviews_file)):
                 raise PilotError("progress_destination_unavailable")
             if os.name != "nt" and args.progress.parent.stat().st_mode & 0o077:
                 raise PilotError("progress_directory_not_private")
@@ -440,11 +525,13 @@ def main(argv=None):
             progress = None if args.progress is None else lambda processed, total: save_report(
                 args.progress, {"processed": processed, "total": total}
             )
-            report = run_pilot(gmail_session, laya_session, args.expected_account.strip(), args.laya_url, key, progress, exclude_ids, args.limit, apply_labels_mode=args.apply_labels)
+            report = run_pilot(gmail_session, laya_session, args.expected_account.strip(), args.laya_url, key, progress, exclude_ids, args.limit,
+                               apply_labels_mode=args.apply_labels, all_inbox=args.all_inbox,
+                               should_stop=None if args.stop_file is None else args.stop_file.exists, reviews=reviews)
         save_report(args.output, report)
         count = sum(row["status"] == "suggestion" for row in report["messages"])
         errors = sum(row["status"] == "error" or bool(row.get("label_error")) for row in report["messages"])
-        mode_text = "Postfach mit Labels aktualisiert." if args.apply_labels else "Postfach unveraendert."
+        mode_text = "Lauf angehalten; Teilbericht gespeichert." if report["status"] == "stopped" else "Postfach mit Labels aktualisiert." if args.apply_labels else "Postfach unveraendert."
         print(f"Privater Bericht gespeichert: {count} Vorschlaege, {errors} Fehler. {mode_text}")
         return 1 if errors else 0
     except PilotError as error:

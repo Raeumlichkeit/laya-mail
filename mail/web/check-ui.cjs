@@ -9,9 +9,12 @@ class Node {
     Object.assign(this, { tag, tagName: tag.toUpperCase(), children: [], dataset: {}, attributes: {}, handlers: {}, value: '', textContent: '', parentElement: null, className: '' });
   }
   set innerHTML(_) { throw new Error('Unsafe HTML insertion'); }
+  get value() { return this._value; }
+  set value(value) { this._value = value; if (this.id === 'progress') this.attributes.value = String(value); }
   append(...nodes) { for (const node of nodes) { node.parentElement = this; this.children.push(node); } }
   replaceChildren(...nodes) { this.children.forEach((node) => { node.parentElement = null; }); this.children = []; this.append(...nodes); }
   setAttribute(key, value) { this.attributes[key] = value; }
+  removeAttribute(key) { delete this.attributes[key]; }
   addEventListener(key, handler) { this.handlers[key] = handler; }
   focus() { context.document.activeElement = this; }
   scrollIntoView() {}
@@ -57,6 +60,7 @@ let reportReads = 0;
 let failSave = false;
 let lastPayload;
 let runPayloads = [];
+let stopCalls = 0;
 let serverStatus = {
   phase: 'complete', finished_at: base.created_utc, batch_mode: 'latest',
   accounts: { selected: 'all', accounts: [{ id: 'first', email: 'first@example.invalid', token_exists: true }, { id: 'second', email: 'second@example.invalid', token_exists: false }] },
@@ -93,10 +97,23 @@ const context = {
       assert.equal(get('run').disabled, true, 'Latest action must be locked while starting');
       assert.equal(get('run-next').disabled, true, 'Next action must be locked while starting');
       assert.equal(get('mail-limit').disabled, true, 'Count must be locked while starting');
+      assert.equal(get('run-all').disabled, true, 'All action must be locked while starting');
+      assert.equal(get('account-select').disabled, true, 'Account selection must be locked while starting');
       const payload = JSON.parse(options.body);
       runPayloads.push(payload);
-      serverStatus = { phase: 'running', finished_at: null, processed: 0, total: payload.limit, requested_limit: payload.limit, batch_mode: payload.mode };
+      serverStatus = { phase: 'running', finished_at: null, processed: 0, total: payload.limit ?? null, requested_limit: payload.limit ?? null, batch_mode: payload.mode, settings: { live_mode: false, sort_inbox: false } };
       data = { status: 'started' };
+    } else if (url === '/api/run/stop') {
+      assert.deepEqual(JSON.parse(options.body), {});
+      assert.equal(get('stop-run').disabled, true, 'Stop is locked while its request is pending');
+      assert.equal(vm.runInContext('status.phase', context), 'running', 'A stop request must not locally finish a run');
+      stopCalls++;
+      serverStatus.stop_requested = true;
+      data = { status: 'stopping' };
+    } else if (url === '/api/labels/apply-current') {
+      assert.equal(get('run-all').disabled, true, 'All-run is locked while label application is pending');
+      assert.equal(get('account-select').disabled, true);
+      data = { status: 'ok', applied_count: serverReport.messages.length, total_messages: serverReport.messages.length, errors: [] };
     } else if (url === '/api/accounts/select') {
       controlPayload = JSON.parse(options.body);
       serverStatus.accounts.selected = controlPayload.selected;
@@ -106,7 +123,7 @@ const context = {
       Object.assign(serverStatus.settings, controlPayload);
       data = serverStatus.settings;
     } else throw new Error('Unexpected route ' + url);
-    return { status: 200, ok: true, json: async () => data };
+    return { status: 200, ok: true, json: async () => structuredClone(data) };
   },
 };
 vm.createContext(context);
@@ -150,10 +167,14 @@ async function press(key, target = new Node('body'), options = {}) {
   get('toggle-live-mode').checked = true;
   await get('toggle-live-mode').handlers.change({ target: get('toggle-live-mode') });
   assert.deepEqual(controlPayload, { live_mode: true });
+  context.renderStatus();
+  assert.equal(get('toggle-live-mode').checked, true, 'A local render must preserve the successful settings update');
   assert.equal(get('live-activity').hidden, false);
   get('toggle-sort-inbox').checked = true;
   await get('toggle-sort-inbox').handlers.change({ target: get('toggle-sort-inbox') });
   assert.deepEqual(controlPayload, { sort_inbox: true });
+  context.renderStatus();
+  assert.equal(get('toggle-sort-inbox').checked, true);
   assert.equal(get('mode-badge-text').textContent, 'Gmail sortieren (Labels aktiv)');
   assert.ok(walk(get('messages')).some((node) => node.textContent === hostile));
   const legacy = get('messages').children[1];
@@ -320,5 +341,60 @@ async function press(key, target = new Node('body'), options = {}) {
   await press('3'); assert.equal(lastPayload.account_email, 'second@example.invalid');
   await get('run-rescan').handlers.click();
   assert.deepEqual(runPayloads.at(-1), { mode: 'rescan', limit: 12 });
-  console.log('PASS: dashboard state; account/live controls; native keyboard actions; navigation/review shortcuts; account-specific feedback; counts and drafts');
+  assert.equal(get('stop-run').hidden, true, 'Stop is only available for an all-mail run');
+  await get('stop-run').handlers.click();
+  assert.equal(stopCalls, 0);
+
+  serverStatus = { phase: 'complete', finished_at: '2026-09-27T10:00:00Z', batch_mode: 'rescan' };
+  await context.refreshStatus();
+  await get('btn-apply-current').handlers.click();
+  serverStatus.applying_labels = true;
+  await context.refreshStatus();
+  assert.equal(get('btn-apply-current').disabled, true);
+  assert.equal(get('run-all').disabled, true);
+  assert.equal(get('account-select').disabled, true);
+  const beforeAll = runPayloads.length;
+  await get('run-all').handlers.click();
+  assert.equal(runPayloads.length, beforeAll, 'An all-mail run cannot start during label application');
+  serverStatus.applying_labels = false;
+  await context.refreshStatus();
+  get('mail-limit').value = '';
+  get('mail-limit').validityReported = false;
+  await get('run-all').handlers.click();
+  assert.deepEqual(runPayloads.at(-1), { mode: 'all' });
+  assert.equal(get('mail-limit').validityReported, false, 'All-mail mode bypasses the batch limit field');
+  assert.equal(get('status-heading').textContent, 'Alle Posteingänge werden gelabelt');
+  assert.equal(get('status-description').textContent, '0 Mails verarbeitet');
+  assert.equal(Object.hasOwn(get('progress').attributes, 'value'), false, 'Listing has indeterminate progress');
+  assert.equal(get('stop-run').hidden, false);
+  assert.equal(get('mode-badge-text').textContent, 'Gmail sortieren (Labels aktiv)', 'All mode labels even with sort_inbox off');
+  serverStatus.processed = 12;
+  serverStatus.total = 65;
+  serverStatus.account_index = 1;
+  serverStatus.accounts_total = 2;
+  await context.refreshStatus();
+  assert.equal(get('status-description').textContent, '12 Mails verarbeitet · Postfach 1 von 2');
+  assert.equal(get('progress').value, 12);
+  assert.equal(get('progress').max, 65);
+  await get('stop-run').handlers.click();
+  assert.equal(stopCalls, 1);
+  assert.equal(vm.runInContext('status.phase', context), 'running');
+  assert.equal(get('stop-run').disabled, true);
+  assert.equal(get('stop-run').textContent, 'Stoppen …');
+  await get('stop-run').handlers.click();
+  assert.equal(stopCalls, 1, 'Do not repeat an acknowledged stop request');
+  serverStatus.phase = 'stopped';
+  serverStatus.finished_at = '2026-09-27T10:02:00Z';
+  await context.refreshStatus();
+  assert.equal(get('status-heading').textContent, 'Labeln gestoppt');
+  assert.match(get('status-description').textContent, /^12 Mails verarbeitet\./);
+  assert.equal(get('stop-run').hidden, true);
+  assert.equal(get('run-all').disabled, false);
+  assert.equal(get('account-select').disabled, false);
+  serverStatus.phase = 'complete';
+  serverStatus.finished_at = '2026-09-27T10:03:00Z';
+  await context.refreshStatus();
+  assert.equal(get('status-heading').textContent, 'Mails gelabelt');
+  assert.match(get('status-description').textContent, /^12 Mails /);
+  console.log('PASS: dashboard/keyboard/account regressions; all-mail start without limit; truthful progress; label/application locks; acknowledged stop and completion');
 })().catch((error) => { console.error(error); process.exitCode = 1; });

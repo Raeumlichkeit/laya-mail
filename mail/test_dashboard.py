@@ -145,6 +145,17 @@ class DashboardCheck(unittest.TestCase):
                         release.set()
                     restored = Dashboard(directory, "test@example.invalid", "http://127.0.0.1:8000/v1/systemone")
                     self.assertEqual(restored.status()["phase"], "error")
+                    app.state = dict(restored.state)
+                    with patch.object(app, "run"):
+                        self.assertEqual(client.post(origin + "/api/run", json={"mode": "all"}, headers=headers, timeout=5).status_code, 202)
+                    self.assertIsNone(app.state["requested_limit"])
+                    self.assertEqual(client.post(origin + "/api/run/stop", json={}, headers={"Origin": "https://evil.invalid"}, timeout=5).status_code, 403)
+                    self.assertFalse((directory / "stop-request.json").exists())
+                    stopped = client.post(origin + "/api/run/stop", json={}, headers=headers, timeout=5)
+                    self.assertEqual(stopped.status_code, 200)
+                    self.assertEqual(stopped.json(), {"status": "stopping"})
+                    self.assertTrue(app.state["stop_requested"])
+                    self.assertEqual(app.state["phase"], "running")  # The worker, not the request, finishes the run.
                     client.post(origin + "/api/logout", json={}, headers={"Origin": origin}, timeout=5)
                     self.assertEqual(client.get(origin + "/api/report", timeout=5).status_code, 401)
             finally:

@@ -5,6 +5,7 @@ Lokale Weboberfläche zum Sortieren von Gmail-Nachrichten mit [Laya](https://git
 ## Funktionen
 
 - Pro Durchlauf insgesamt 1–100 Mails aus den ausgewählten Posteingängen laden; neue Stapel überspringen bereits angezeigte Nachrichten getrennt je Konto.
+- **Alle Mails im Posteingang labeln**: Durchläuft sämtliche Seiten der ausgewählten aktiven Posteingänge, einschließlich bereits geladener Nachrichten. Dieser Knopf setzt Gmail-Labels unabhängig vom Sortier-Toggle. Passende gespeicherte Korrekturen haben Vorrang; mit „Nach aktueller Mail stoppen“ lässt sich der Lauf beenden. Bereits verarbeitete Ergebnisse bleiben erhalten. Archiv, Gesendet, Papierkorb und Gmail-Spamordner werden nicht einbezogen.
 - Inhalt: **Rechnung**, **Allgemeine Information**, **Werbung**, **Sonstiges**.
 - **Wichtig** und **Spamverdacht** werden unabhängig davon bewertet.
 - **⚡ Live GPU-Statusanzeige**: Header-Badge zeigt in Echtzeit den Verbindungsstatus und die Latenz der NVIDIA-Grafikkarte (z. B. `RTX 4070 Ti verbunden · 3 ms`), mit automatischem Fallback auf CPU.
@@ -21,6 +22,8 @@ Lokale Weboberfläche zum Sortieren von Gmail-Nachrichten mit [Laya](https://git
 Im Standardmodus liest Laya Mail mit `gmail.readonly`. Bei aktiviertem Sortier-Toggle werden ausschließlich Klassifizierungs-Labels vergeben (`gmail.modify`). Das Programm versendet und löscht unter keinen Umständen E-Mails; alle Nachrichten verbleiben sicher im Posteingang. Anhänge und verlinkte Seiten werden nicht gelesen. Modell-Scores sind keine gemessenen Zuverlässigkeitsquoten.
 
 Beim Aktualisieren werden die fünf verwalteten Gmail-Labels abgeglichen: Überholte Zuordnungen werden entfernt, andere Labels bleiben erhalten. Vor Schreibzugriffen wird geprüft, ob die Google-Anmeldung zum jeweiligen Postfach gehört. Bewertungen und Ladehistorie bleiben je Konto getrennt, auch wenn Nachrichten dieselbe ID haben.
+
+Während einer vollständigen Sortierung bleibt das Dashboard bedienbar; andere Sortierläufe warten bis zum Abschluss. Die Anzeige nennt verarbeitete Nachrichten und das aktuelle Postfach. Ein Stopp macht bereits gesetzte Labels nicht rückgängig. Der Alle-Lauf beginnt beim nächsten Start wieder von vorn.
 
 ## Aufbau
 

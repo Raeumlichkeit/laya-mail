@@ -199,6 +199,80 @@ class RoutingCheck(unittest.TestCase):
             self.assertEqual(self.app.report_path, previous)
             self.assertEqual(list(self.directory.glob("pilot-*.json")), [previous])
 
+    def test_all_inbox_forces_labels_and_routes_reviews_per_account(self):
+        self.set_report([message(PRIMARY), message(SECONDARY)])
+        report = self.app.review_report()
+        for row in report["messages"]:
+            self.app.save_feedback({"report_id": report["report_id"], "message_id": row["message_id"],
+                                    "account_email": row["account_email"], "snapshot_id": row["snapshot_id"],
+                                    "action": "corrected", "labels": {**LABELS, "wichtig": "ja" if row["account_email"] == PRIMARY else "nein"}})
+        commands = []
+
+        def pilot(command, **kwargs):
+            commands.append(command)
+            self.assertIn("--all-inbox", command)
+            self.assertIn("--apply-labels", command)
+            self.assertNotIn("--exclude-ids-file", command)
+            self.assertIsNone(kwargs["timeout"])
+            email = command[command.index("--expected-account") + 1]
+            reviews_path = Path(command[command.index("--reviews-file") + 1])
+            reviews = json.loads(reviews_path.read_text())
+            self.assertEqual(set(reviews), {"abc123"})
+            self.assertEqual(reviews["abc123"]["labels"]["wichtig"], "ja" if email == PRIMARY else "nein")
+            save_report(Path(command[command.index("--output") + 1]), {
+                "status": "complete", "messages": [message(email, format(i, "x")) for i in range(125)], "total": 125})
+            return SimpleNamespace(returncode=0)
+
+        with patch("dashboard.threading.Thread"):
+            self.assertTrue(self.app.start("all"))
+        self.assertIsNone(self.app.state["requested_limit"])
+        with patch("dashboard.subprocess.run", side_effect=pilot):
+            self.app.run("all", None)
+        self.assertEqual(len(commands), 2)
+        self.assertEqual(len(self.app.report()["messages"]), 250)
+        self.assertEqual(self.app.state["phase"], "complete")
+        self.assertIsNone(self.app.report()["limit"])
+        self.assertFalse(list(self.directory.glob(".*-reviews.json")))
+
+    def test_stop_preserves_partial_report_and_skips_remaining_accounts(self):
+        with patch("dashboard.threading.Thread"):
+            self.assertTrue(self.app.start("all"))
+        with patch.object(self.app, "gpu_status", return_value={"online": False}):
+            self.assertIsNone(self.app.status()["total"])
+            self.assertFalse(self.app.status()["read_only"])
+
+        def pilot(command, **kwargs):
+            self.assertEqual(self.app.stop_run(), {"status": "stopping"})
+            self.assertTrue(Path(command[command.index("--stop-file") + 1]).is_file())
+            save_report(Path(command[command.index("--output") + 1]), {
+                "status": "stopped", "messages": [message(PRIMARY)], "total": 250})
+            return SimpleNamespace(returncode=0)
+
+        with patch("dashboard.subprocess.run", side_effect=pilot) as run:
+            self.app.run("all", None)
+        run.assert_called_once()
+        self.assertEqual(self.app.state["phase"], "stopped")
+        self.assertEqual(len(self.app.report()["messages"]), 1)
+        self.assertEqual(self.app.report()["status"], "stopped")
+        with self.assertRaises(FeedbackError):
+            self.app.stop_run()
+        with patch("dashboard.threading.Thread"):
+            self.assertTrue(self.app.start("all"))
+        self.assertFalse((self.directory / "stop-request.json").exists())
+        self.assertFalse(self.app.state["stop_requested"])
+
+    def test_stop_before_first_account_keeps_existing_report(self):
+        self.set_report([message(PRIMARY)])
+        previous = self.app.report_path
+        with patch("dashboard.threading.Thread"):
+            self.app.start("all")
+        self.app.stop_run()
+        with patch("dashboard.subprocess.run") as run:
+            self.app.run("all", None)
+        run.assert_not_called()
+        self.assertEqual(self.app.state["phase"], "stopped")
+        self.assertEqual(self.app.report_path, previous)
+
 
 if __name__ == "__main__":
     unittest.main()

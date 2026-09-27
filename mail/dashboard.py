@@ -507,9 +507,13 @@ class Dashboard:
                 try:
                     progress = json.loads((self.directory / "progress.json").read_text())
                     state.update(processed=state.get("progress_offset", 0) + int(progress["processed"]))
+                    if state.get("batch_mode") == "all":
+                        state["total"] = (None if progress.get("total") is None else
+                                          state.get("progress_offset", 0) + int(progress["total"]))
                 except (OSError, ValueError, KeyError, TypeError):
                     pass
-        state.update(read_only=not self.settings.get("sort_inbox", False))
+        state.update(read_only=not (self.settings.get("sort_inbox", False)
+                                   or (state["phase"] == "running" and state.get("batch_mode") in {"all", "rescan"})))
         state["accounts"] = self.accounts_mgr.get_state()
         state["settings"] = self.get_settings()
         state["gpu"] = self.gpu_status()
@@ -549,10 +553,12 @@ class Dashboard:
         return (*cpu[:3], "Hauptrechner nicht bereit; dieser Stapel läuft auf dem Mac mini.")
 
     def start(self, mode="latest", limit=20, live=False):
-        if not isinstance(mode, str) or mode not in {"latest", "next", "rescan"}:
+        if not isinstance(mode, str) or mode not in {"latest", "next", "rescan", "all"}:
             raise FeedbackError("Bitte eine gültige Ladeaktion wählen.")
-        if type(limit) is not int or not 1 <= limit <= 100:
+        if mode != "all" and (type(limit) is not int or not 1 <= limit <= 100):
             raise FeedbackError("Bitte eine ganze Anzahl zwischen 1 und 100 wählen.")
+        if mode == "all":
+            limit = None
         with self.lock:
             if self.state["phase"] == "running" or self.applying_labels:
                 return False
@@ -565,13 +571,15 @@ class Dashboard:
                         save_report(self.seen_path(target["email"]), sorted(self.seen_ids(target["email"])))
                 except (ValueError, TypeError, KeyError) as error:
                     raise FeedbackError("Die bisherigen Berichte konnten nicht gelesen werden. Der nächste Stapel wurde nicht gestartet.", 503) from error
+            (self.directory / "stop-request.json").unlink(missing_ok=True)
             pending = dict(self.state, phase="running", processed=0, total=limit, started_at=now(),
-                           finished_at=None, error=None, batch_mode=mode, requested_limit=limit, progress_offset=0)
+                           finished_at=None, error=None, batch_mode=mode, requested_limit=limit, progress_offset=0,
+                           stop_requested=False, accounts_total=len(targets), account_index=1)
             save_report(self.directory / "progress.json", {"processed": 0, "total": limit})
             save_report(self.directory / "status.json", pending)
             self.state = pending
             self._run_targets = targets
-            self._run_sort = bool(self.settings.get("sort_inbox", False)) or mode == "rescan"
+            self._run_sort = bool(self.settings.get("sort_inbox", False)) or mode in {"rescan", "all"}
             self._run_live = live
             try:
                 threading.Thread(target=self.run, args=(mode, limit), daemon=True).start()
@@ -581,27 +589,45 @@ class Dashboard:
                 raise OSError("Worker unavailable") from error
         return True
 
+    def stop_run(self):
+        with self.lock:
+            if self.state["phase"] != "running" or self.state.get("batch_mode") != "all":
+                raise FeedbackError("Es läuft gerade keine vollständige Posteingang-Sortierung.", 409)
+            save_report(self.directory / "stop-request.json", {"requested_at": now()})
+            self.state["stop_requested"] = True
+            save_report(self.directory / "status.json", self.state)
+        return {"status": "stopping"}
+
     def run(self, mode="latest", limit=20):
         # No dashboard lock is held while probing the optional GPU host.
         laya_url, key_path, model, note = self.select_backend()
         targets = getattr(self, "_run_targets", None) or self.accounts_mgr.get_active_targets()
-        sort_inbox = getattr(self, "_run_sort", bool(self.settings.get("sort_inbox", False)) or mode == "rescan")
+        sort_inbox = mode in {"rescan", "all"} or getattr(self, "_run_sort", bool(self.settings.get("sort_inbox", False)))
+        all_inbox = mode == "all"
+        stopped = False
         all_rows = []
         errors = []
         report_path = self.directory / ("pilot-" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ") + ".json")
         report = {"created_utc": now(), "input_version": INPUT_VERSION, "batch_mode": mode,
-                  "read_only": not sort_inbox, "applied_labels": sort_inbox, "limit": limit,
+                  "read_only": not sort_inbox, "applied_labels": sort_inbox, "limit": None if all_inbox else limit,
                   "category_definitions": QUESTIONS, "processing_backend": model}
 
         for index, target in enumerate(targets):
-            remaining = limit - len(all_rows)
-            if remaining <= 0:
+            if all_inbox and (self.directory / "stop-request.json").exists():
+                stopped = True
                 break
-            remaining_accounts = len(targets) - index
-            quota = max(1, (remaining + remaining_accounts - 1) // remaining_accounts)
+            if all_inbox:
+                quota = 100  # The pilot ignores the bounded-batch limit with --all-inbox.
+            else:
+                remaining = limit - len(all_rows)
+                if remaining <= 0:
+                    break
+                remaining_accounts = len(targets) - index
+                quota = max(1, (remaining + remaining_accounts - 1) // remaining_accounts)
             email = target["email"]
             token = target["token_path"]
             account_report_path = self.directory / f".{report_path.stem}-{index}.json"
+            reviews_path = self.directory / f".{report_path.stem}-{index}-reviews.json"
             command = [
                 sys.executable, str(Path(__file__).with_name("pilot_gmail.py")),
                 "--token", str(token),
@@ -616,13 +642,26 @@ class Dashboard:
                 command.extend(["--exclude-ids-file", str(self.seen_path(email))])
             if sort_inbox:
                 command.append("--apply-labels")
+                command.extend(["--reviews-file", str(reviews_path)])
+            if all_inbox:
+                command.extend(["--all-inbox", "--stop-file", str(self.directory / "stop-request.json")])
 
             try:
                 with self.lock:
-                    self.state.update(model=model, processing_note=note, progress_offset=len(all_rows))
-                    save_report(self.directory / "progress.json", {"processed": 0, "total": quota})
+                    self.state.update(model=model, processing_note=note, progress_offset=len(all_rows),
+                                      account_index=index + 1, accounts_total=len(targets))
+                    save_report(self.directory / "progress.json", {"processed": 0, "total": None if all_inbox else quota})
+                    if sort_inbox:
+                        reviews = {}
+                        for key, item in self.feedback["items"].items():
+                            owner = item.get("account_email") or (key.rsplit(":", 1)[0] if ":" in key else self.account)
+                            if owner.casefold() == email.casefold() and training_eligible(item):
+                                message_id = item.get("message_id") or key.rsplit(":", 1)[-1]
+                                reviews[message_id] = {name: item[name] for name in ("action", "labels", "snapshot_id")}
+                        save_report(reviews_path, reviews)
                     save_report(self.directory / "status.json", self.state)
-                result = subprocess.run(command, capture_output=True, text=True, timeout=max(900, quota * 20))
+                result = subprocess.run(command, capture_output=True, text=True,
+                                        timeout=None if all_inbox else max(900, quota * 20))
                 pilot_error = None
                 if result.returncode:
                     pilot_error = pilot_failure_message(getattr(result, "stderr", None))
@@ -635,11 +674,19 @@ class Dashboard:
                         all_rows.append(msg)
                     if rep.get("status") == "error":
                         errors.append("Ein Postfach meldet Fehler; bitte die Nachrichtenhinweise prüfen.")
+                    stopped = stopped or rep.get("status") == "stopped"
                     account_report_path.unlink(missing_ok=True)
                 elif not pilot_error:
                     errors.append("Für ein Postfach wurde kein Auswertungsbericht erstellt.")
             except (OSError, ValueError, KeyError, TypeError, subprocess.TimeoutExpired):
                 errors.append("Ein Postfachlauf wurde abgebrochen oder lieferte einen ungültigen Bericht.")
+            finally:
+                try:
+                    reviews_path.unlink(missing_ok=True)
+                except OSError:
+                    errors.append("Die temporären Bewertungen konnten nicht aufgeräumt werden.")
+            if all_inbox and (stopped or errors):
+                break
 
         with self.lock:
             if not targets:
@@ -648,15 +695,17 @@ class Dashboard:
                 errors.append("Einzelne Nachrichten konnten nicht vollständig verarbeitet werden.")
             error = " ".join(dict.fromkeys(errors)) or None
             count = len(all_rows)
-            report.update(status="error" if error else "complete", messages=all_rows)
+            stopped = stopped or (all_inbox and self.state.get("stop_requested", False))
+            phase = "error" if error else "stopped" if stopped else "complete"
+            report.update(status=phase, messages=all_rows)
             try:
-                if count or (not error and not getattr(self, "_run_live", False)):
+                if count or (not error and not stopped and not getattr(self, "_run_live", False)):
                     save_report(report_path, report)
                     self.report_path = report_path
             except OSError:
                 error = "Der neue Auswertungsbericht konnte nicht gespeichert werden."
 
-            self.state.update(phase="error" if error else "complete", processed=count,
+            self.state.update(phase="error" if error else phase, processed=count,
                               total=count, finished_at=now(), error=error, progress_offset=0)
             try:
                 save_report(self.directory / "status.json", self.state)
@@ -850,6 +899,13 @@ class Handler(BaseHTTPRequestHandler):
                 self.json(error.status, {"error": str(error)})
             except Exception:
                 self.json(500, {"error": "Labels konnten nicht aktualisiert werden."})
+        elif path == "/api/run/stop":
+            try:
+                self.json(200, self.app.stop_run())
+            except FeedbackError as error:
+                self.json(error.status, {"error": str(error)})
+            except OSError:
+                self.json(503, {"error": "Der Stopp konnte nicht gespeichert werden. Bitte erneut versuchen."})
         elif path == "/api/run":
             try:
                 value = json.loads(data or b"{}")

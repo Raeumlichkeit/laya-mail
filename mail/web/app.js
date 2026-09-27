@@ -15,6 +15,8 @@ let saving = false;
 let reportVersion = 0;
 let errorSource = null;
 let selectedMailKey = null;
+let stopping = false;
+let applyingCurrent = false;
 const contentLabels = { rechnung: 'Rechnung', info: 'Allgemeine Information', werbung: 'Werbung', sonstiges: 'Sonstiges' };
 const reviewLabels = { accepted: 'Bestätigt', corrected: 'Korrigiert', skipped: 'Übersprungen' };
 
@@ -111,13 +113,20 @@ function renderStatus() {
   const validLimit = Number.isInteger(selected) && selected >= 1 && selected <= 100;
   const selectedText = validLimit ? `${selected} ` : '';
   const processed = Math.max(0, Number(status?.processed) || 0);
-  const locked = !status || running || Boolean(starting) || Boolean(editing) || saving;
+  const applying = applyingCurrent || Boolean(status?.applying_labels);
+  const locked = !status || running || Boolean(starting) || Boolean(editing) || saving || applying;
   const activeMode = starting || status?.batch_mode || 'latest';
+  const allMode = activeMode === 'all';
   const activeLimit = startingLimit || status?.requested_limit || 20;
   const total = Math.max(0, Number(status?.total ?? activeLimit) || 0);
   $('run').disabled = locked;
   $('run-next').disabled = locked;
   $('mail-limit').disabled = locked;
+  $('run-all').disabled = locked;
+  $('account-select').disabled = locked;
+  $('stop-run').hidden = !(running && status?.batch_mode === 'all');
+  $('stop-run').disabled = stopping || Boolean(status?.stop_requested);
+  $('stop-run').textContent = stopping || status?.stop_requested ? 'Stoppen …' : 'Nach aktueller Mail stoppen';
   if ($('run-rescan')) {
     $('run-rescan').disabled = locked;
     $('run-rescan-label').textContent = (running || starting) && activeMode === 'rescan' ? `Sortiert bis zu ${activeLimit} Mails …` : `${selectedText}Mails neu durchsortieren`;
@@ -125,14 +134,20 @@ function renderStatus() {
   if ($('btn-apply-current')) {
     const hasMessages = Boolean(report?.messages && report.messages.length > 0);
     $('btn-apply-current').disabled = locked || !hasMessages;
-    $('btn-apply-current-label').textContent = hasMessages ? `${report.messages.length} geladene Mails in Gmail labeln` : 'Geladene Mails in Gmail labeln';
+    $('btn-apply-current-label').textContent = applying ? 'Labels werden in Gmail vergeben …' : hasMessages ? `${report.messages.length} geladene Mails in Gmail labeln` : 'Geladene Mails in Gmail labeln';
   }
   $('run-label').textContent = (running || starting) && activeMode === 'latest' ? `Prüft bis zu ${activeLimit} Mails …` : report.report_id ? `Neueste ${selectedText}erneut prüfen` : `${selectedText}Mails prüfen`;
   $('run-next-label').textContent = (running || starting) && activeMode === 'next' ? `Lädt bis zu ${activeLimit} Mails …` : `Nächste ${selectedText}Mails laden`;
   $('status-symbol').className = `status-symbol${running ? ' running' : failed ? ' error' : ''}`;
   $('progress-wrap').hidden = !running;
-  $('progress').max = Math.max(1, total);
-  $('progress').value = Math.min(processed, total);
+  if (running && status?.total === null) {
+    $('progress').removeAttribute('value');
+  } else {
+    $('progress').max = Math.max(1, total);
+    $('progress').value = Math.min(processed, total);
+  }
+  $('progress').setAttribute('aria-label', allMode ? 'Fortschritt der bisher erfassten Postfächer' : 'Fortschritt der Auswertung');
+  $('progress-note').textContent = allMode ? 'Die Gesamtzahl steht erst nach Erfassung aller Postfächer fest. Der bestehende Bericht bleibt währenddessen sichtbar.' : 'Der bestehende Bericht bleibt während der Auswertung sichtbar.';
   const gpu = status?.model?.device === 'cuda';
   const processingHost = status?.model?.host || (gpu ? 'Hauptrechner' : 'Mac mini');
   $('processing-location').textContent = `Auswertung: ${processingHost} · ${gpu ? 'RTX 4070 Ti' : 'CPU'}`;
@@ -140,15 +155,23 @@ function renderStatus() {
   $('processing-note').textContent = processingNote;
   $('processing-note').hidden = !processingNote;
   if (running) {
-    $('status-heading').textContent = 'Laya prüft deine Mails';
-    $('status-description').textContent = `${processed} von ${total} Nachrichten verarbeitet. Die Anzeige aktualisiert sich automatisch.`;
+    $('status-heading').textContent = allMode ? 'Alle Posteingänge werden gelabelt' : 'Laya prüft deine Mails';
+    const accountProgress = Number.isInteger(status.account_index) && Number.isInteger(status.accounts_total) && status.account_index > 0 && status.accounts_total > 0 ? ` · Postfach ${status.account_index} von ${status.accounts_total}` : '';
+    $('status-description').textContent = allMode ? `${processed} Mails verarbeitet${accountProgress}` : `${processed} von ${total} Nachrichten verarbeitet. Die Anzeige aktualisiert sich automatisch.`;
   } else if (failed) {
     $('status-heading').textContent = 'Die Auswertung wurde unterbrochen';
     $('status-description').textContent = status.error || 'Bitte starte die Prüfung erneut.';
+  } else if (status?.phase === 'stopped') {
+    $('status-heading').textContent = 'Labeln gestoppt';
+    $('status-description').textContent = `${processed} Mails verarbeitet. Bereits gesetzte Labels bleiben erhalten.`;
+  } else if (status?.phase === 'complete' && allMode) {
+    $('status-heading').textContent = 'Mails gelabelt';
+    $('status-description').textContent = `${processed} Mails in den ausgewählten Posteingängen verarbeitet.`;
   } else if (status) {
     $('status-heading').textContent = status.phase === 'complete' ? 'Die Auswertung ist abgeschlossen' : 'Bereit für deine Mails';
     $('status-description').textContent = 'Wähle die Anzahl der Nachrichten für deine nächste lokale Auswertung.';
   }
+  if (status?.settings) renderSettings(status.settings);
 }
 
 function label(text, kind) {
@@ -524,7 +547,7 @@ function renderSettings(settings) {
   if (sortToggle) sortToggle.checked = Boolean(settings.sort_inbox);
 
   if (modeBadge && modeBadgeText) {
-    if (settings.sort_inbox) {
+    if (settings.sort_inbox || applyingCurrent || status?.applying_labels || ((starting || status?.phase === 'running') && (starting || status?.batch_mode) === 'all')) {
       modeBadge.className = 'readonly-badge sort-active';
       modeBadgeText.textContent = 'Gmail sortieren (Labels aktiv)';
     } else {
@@ -594,10 +617,10 @@ $('return-correction').addEventListener('click', () => {
   document.querySelector('.correction-form select')?.focus();
 });
 async function startRun(mode) {
-  if (starting || status?.phase === 'running' || editing || saving) return;
+  if (starting || status?.phase === 'running' || editing || saving || applyingCurrent || status?.applying_labels) return;
   const input = $('mail-limit');
-  const limit = Number(input.value);
-  if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
+  const limit = mode === 'all' ? null : Number(input.value);
+  if (mode !== 'all' && (!Number.isInteger(limit) || limit < 1 || limit > 100)) {
     input.reportValidity();
     return;
   }
@@ -606,7 +629,7 @@ async function startRun(mode) {
   renderStatus();
   showError('');
   try {
-    await api('/api/run', 'POST', { mode, limit });
+    await api('/api/run', 'POST', mode === 'all' ? { mode } : { mode, limit });
     if (mode === 'next') {
       $('search').value = '';
       selectFilter('unreviewed');
@@ -623,12 +646,29 @@ async function startRun(mode) {
 $('run').addEventListener('click', () => startRun('latest'));
 $('run-next').addEventListener('click', () => startRun('next'));
 $('run-rescan')?.addEventListener('click', () => startRun('rescan'));
+$('run-all').addEventListener('click', () => startRun('all'));
 $('mail-limit').addEventListener('input', renderStatus);
+$('stop-run').addEventListener('click', async () => {
+  if (stopping || status?.phase !== 'running' || status?.batch_mode !== 'all' || status?.stop_requested) return;
+  stopping = true;
+  renderStatus();
+  try {
+    await api('/api/run/stop', 'POST', {});
+    await refreshStatus();
+  } catch (error) {
+    if (!leaving) showError(`Der Stopp konnte nicht angefordert werden. ${error.message}`);
+  } finally {
+    stopping = false;
+    renderStatus();
+  }
+});
 
 $('btn-apply-current')?.addEventListener('click', async () => {
   const btn = $('btn-apply-current');
   const labelSpan = $('btn-apply-current-label');
   if (!btn || btn.disabled) return;
+  applyingCurrent = true;
+  renderStatus();
   btn.disabled = true;
   const oldText = labelSpan ? labelSpan.textContent : '';
   if (labelSpan) labelSpan.textContent = 'Labels werden in Gmail vergeben …';
@@ -650,6 +690,7 @@ $('btn-apply-current')?.addEventListener('click', async () => {
   } catch (err) {
     showError(`Fehler beim Labeln: ${err.message}`);
   } finally {
+    applyingCurrent = false;
     btn.disabled = false;
     if (labelSpan) labelSpan.textContent = oldText;
     renderStatus();
@@ -669,6 +710,7 @@ $('account-select')?.addEventListener('change', async (e) => {
 $('toggle-live-mode')?.addEventListener('change', async (e) => {
   try {
     const res = await api('/api/settings', 'POST', { live_mode: e.target.checked });
+    if (status) status.settings = res;
     renderSettings(res);
   } catch (err) {
     e.target.checked = !e.target.checked;
@@ -679,6 +721,7 @@ $('toggle-live-mode')?.addEventListener('change', async (e) => {
 $('toggle-sort-inbox')?.addEventListener('change', async (e) => {
   try {
     const res = await api('/api/settings', 'POST', { sort_inbox: e.target.checked });
+    if (status) status.settings = res;
     renderSettings(res);
   } catch (err) {
     e.target.checked = !e.target.checked;
