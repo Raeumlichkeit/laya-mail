@@ -14,17 +14,21 @@ import tempfile
 from google_auth_oauthlib.flow import InstalledAppFlow
 
 
-SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
+READONLY_SCOPE = "https://www.googleapis.com/auth/gmail.readonly"
+MODIFY_SCOPE = "https://www.googleapis.com/auth/gmail.modify"
+SCOPES = [READONLY_SCOPE]
+MODIFY_SCOPES = [READONLY_SCOPE, MODIFY_SCOPE]
 
 
-def authorize(client_path: Path, token_path: Path, expected_project: str) -> None:
+def authorize(client_path: Path, token_path: Path, expected_project: str, modify: bool = False) -> None:
     if not isinstance(expected_project, str) or not expected_project.strip():
         raise ValueError("Expected project ID is required")
     if token_path.exists() or not token_path.parent.is_dir():
         raise ValueError("Token destination unavailable")
 
+    target_scopes = MODIFY_SCOPES if modify else SCOPES
     flow = InstalledAppFlow.from_client_secrets_file(
-        str(client_path), scopes=SCOPES, autogenerate_code_verifier=True
+        str(client_path), scopes=target_scopes, autogenerate_code_verifier=True
     )
     config = flow.client_config
     if (
@@ -57,9 +61,9 @@ def authorize(client_path: Path, token_path: Path, expected_project: str) -> Non
     finally:
         logging.disable(previous_logging)
 
-    if not credentials.refresh_token or not credentials.has_scopes(SCOPES):
-        raise ValueError("Required offline read-only grant missing")
-    if credentials.granted_scopes and set(credentials.granted_scopes) != set(SCOPES):
+    if not credentials.refresh_token or not credentials.has_scopes(target_scopes):
+        raise ValueError("Required offline grant missing")
+    if credentials.granted_scopes and set(credentials.granted_scopes) != set(target_scopes):
         raise ValueError("Unexpected granted scopes")
 
     # mkstemp creates mode 0600 on Unix and inherits the parent ACL on Windows.
@@ -79,9 +83,10 @@ def main(argv=None) -> int:
     parser.add_argument("--client", required=True, type=Path, help="Downloaded desktop OAuth JSON")
     parser.add_argument("--token", required=True, type=Path, help="New token file in a private directory")
     parser.add_argument("--project-id", required=True, help="Expected Google Cloud project ID for this desktop client")
+    parser.add_argument("--modify", action="store_true", help="Authorize write access to manage labels (gmail.modify)")
     args = parser.parse_args(argv)
     try:
-        authorize(args.client, args.token, args.project_id)
+        authorize(args.client, args.token, args.project_id, modify=args.modify)
     except KeyboardInterrupt:
         print("Freigabe abgebrochen; kein neuer Token gespeichert.", file=sys.stderr)
         return 1
@@ -93,7 +98,8 @@ def main(argv=None) -> int:
             file=sys.stderr,
         )
         return 1
-    print("Gmail-Lesezugriff autorisiert; Token gespeichert. Keine E-Mails abgerufen.")
+    scope_text = "Gmail-Lese- und Schreibzugriff (Labels)" if args.modify else "Gmail-Lesezugriff"
+    print(f"{scope_text} autorisiert; Token gespeichert. Keine E-Mails abgerufen.")
     return 0
 
 

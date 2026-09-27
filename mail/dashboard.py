@@ -327,6 +327,15 @@ class Dashboard:
 
                 try:
                     creds = Credentials.from_authorized_user_file(str(token_path))
+                    scopes = getattr(creds, "scopes", None)
+                    if scopes is not None and "https://www.googleapis.com/auth/gmail.modify" not in scopes:
+                        errors.append(
+                            f"Konto {email}: Token verfügt nur über Lesezugriff (gmail.readonly). "
+                            "Für das Setzen von Labels wird die Berechtigung 'gmail.modify' benötigt. "
+                            "Bitte den Token mit '--modify' neu autorisieren."
+                        )
+                        continue
+
                     with AuthorizedSession(creds) as session:
                         session.trust_env = False
                         label_cache = get_or_create_labels(session)

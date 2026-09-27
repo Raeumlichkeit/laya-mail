@@ -52,9 +52,18 @@ def get_or_create_labels(session):
                         label_cache[key] = lbl["id"]
                         break
             else:
-                logging.warning("Failed to create label %s: %s", name, create_res.text)
+                if create_res.status_code == 403:
+                    raise LabelerError(
+                        f"Keine Berechtigung zum Erstellen des Labels '{name}' (Status 403). "
+                        "Der Gmail-Token benötigt Schreibrechte (gmail.modify)."
+                    )
+                raise LabelerError(
+                    f"Label '{name}' konnte nicht erstellt werden (Status {create_res.status_code}): {create_res.text}"
+                )
+        except LabelerError:
+            raise
         except Exception as err:
-            logging.warning("Error creating label %s: %s", name, err)
+            raise LabelerError(f"Fehler beim Erstellen des Labels '{name}': {err}") from err
 
     return label_cache
 
@@ -77,13 +86,24 @@ def labels_for_suggestions(suggestions):
 def apply_labels(session, message_id, suggestions, label_cache, archive=False):
     """Apply sorting labels to a Gmail message via messages.modify."""
     keys_to_add = labels_for_suggestions(suggestions)
-    add_ids = [label_cache[k] for k in keys_to_add if k in label_cache]
-    if not add_ids and not archive:
+    if not keys_to_add and not archive:
         return []
 
+    missing = [k for k in keys_to_add if k not in label_cache]
+    if missing:
+        missing_names = [LABEL_MAP.get(k, k) for k in missing]
+        raise LabelerError(f"Label-IDs fehlen fuer: {', '.join(missing_names)}")
+
+    add_ids = [label_cache[k] for k in keys_to_add if k in label_cache]
     payload = {"addLabelIds": add_ids, "removeLabelIds": ["INBOX"] if archive else []}
     res = session.post(f"{GMAIL}/messages/{message_id}/modify", json=payload, timeout=15)
+    if res.status_code == 403:
+        raise LabelerError(
+            "Keine Berechtigung zum Ändern der E-Mail-Labels (Status 403). "
+            "Der Gmail-Token benötigt Schreibrechte (gmail.modify)."
+        )
     if res.status_code != 200:
         raise LabelerError(f"modify_failed_status_{res.status_code}")
 
     return [LABEL_MAP[k] for k in keys_to_add if k in label_cache]
+

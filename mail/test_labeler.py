@@ -78,6 +78,37 @@ class LabelerTests(unittest.TestCase):
         self.assertEqual(applied, [])
         session.post.assert_not_called()
 
+    def test_get_or_create_labels_permission_denied(self):
+        session = MagicMock()
+        session.get.return_value.status_code = 200
+        session.get.return_value.json.return_value = {"labels": []}
+        resp = MagicMock()
+        resp.status_code = 403
+        resp.text = "Forbidden"
+        session.post.return_value = resp
+
+        with self.assertRaises(LabelerError) as ctx:
+            get_or_create_labels(session)
+        self.assertIn("403", str(ctx.exception))
+        self.assertIn("gmail.modify", str(ctx.exception))
+
+    def test_apply_labels_permission_denied(self):
+        session = MagicMock()
+        session.post.return_value.status_code = 403
+        label_cache = {"rechnung": "id_1"}
+        with self.assertRaises(LabelerError) as ctx:
+            apply_labels(session, "msg_123", {"inhalt": "rechnung"}, label_cache)
+        self.assertIn("403", str(ctx.exception))
+        self.assertIn("gmail.modify", str(ctx.exception))
+
+    def test_apply_labels_missing_cache_key(self):
+        session = MagicMock()
+        label_cache = {}  # Empty cache
+        with self.assertRaises(LabelerError) as ctx:
+            apply_labels(session, "msg_123", {"inhalt": "rechnung"}, label_cache)
+        self.assertIn("Label-IDs fehlen", str(ctx.exception))
+
 
 if __name__ == "__main__":
     unittest.main()
+

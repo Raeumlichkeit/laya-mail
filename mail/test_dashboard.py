@@ -314,7 +314,16 @@ class DashboardCheck(unittest.TestCase):
                     self.assertTrue(any("Berichtspfad hat sich" in e for e in res2["errors"]))
                 app.report_path = orig_target
 
+            # 4. Test missing modify scope returns clear error
+            fake_readonly_creds = unittest.mock.MagicMock()
+            fake_readonly_creds.scopes = ["https://www.googleapis.com/auth/gmail.readonly"]
+            with patch("google.oauth2.credentials.Credentials.from_authorized_user_file", return_value=fake_readonly_creds):
+                res3 = app.apply_current_labels()
+                self.assertEqual(res3["applied_count"], 0)
+                self.assertTrue(any("gmail.modify" in e for e in res3["errors"]))
+
 
 if __name__ == "__main__":
     unittest.main()
+
 

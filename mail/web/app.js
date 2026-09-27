@@ -624,7 +624,11 @@ $('btn-apply-current')?.addEventListener('click', async () => {
     const res = await api('/api/labels/apply-current', 'POST', {});
     if (res.status === 'ok') {
       const errNote = res.errors && res.errors.length ? ` (${res.errors.join('; ')})` : '';
-      showError(`✓ ${res.applied_count} von ${res.total_messages} E-Mails erfolgreich in Gmail gelabelt!${errNote}`);
+      if (res.applied_count === 0 && res.errors && res.errors.length) {
+        showError(`⚠️ Keine E-Mails gelabelt: ${res.errors.join('; ')}`);
+      } else {
+        showError(`✓ ${res.applied_count} von ${res.total_messages} E-Mails erfolgreich in Gmail gelabelt!${errNote}`);
+      }
       reportPending = true;
       await refreshStatus();
     } else {
