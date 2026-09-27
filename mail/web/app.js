@@ -19,6 +19,15 @@ let stopping = false;
 let applyingCurrent = false;
 const contentLabels = { rechnung: 'Rechnung', info: 'Allgemeine Information', werbung: 'Werbung', sonstiges: 'Sonstiges' };
 const reviewLabels = { accepted: 'Bestätigt', corrected: 'Korrigiert', skipped: 'Übersprungen' };
+const mailErrorMessages = {
+  gmail_rate_limited: 'Gmail begrenzt derzeit die Anfragen. Bitte später erneut versuchen.',
+  gmail_quota_exceeded: 'Das Gmail-Tageskontingent ist ausgeschöpft. Bitte nach dessen Zurücksetzung erneut versuchen.',
+  gmail_temporary_error: 'Gmail meldet einen vorübergehenden Fehler. Bitte später erneut versuchen.',
+  gmail_message_not_found: 'Diese Nachricht ist in Gmail nicht mehr verfügbar.',
+  gmail_authentication_failed: 'Die Gmail-Anmeldung ist nicht mehr gültig. Bitte erneut anmelden.',
+  gmail_permission_denied: 'Gmail hat den Zugriff auf diese Nachricht verweigert. Bitte die Anmeldung prüfen.',
+  gmail_request_failed: 'Diese Nachricht konnte nicht von Gmail geladen werden.',
+};
 
 function mailKey(mail) {
   return JSON.stringify([mail.account_email || '', mail.message_id || '']);
@@ -346,7 +355,10 @@ function renderMail(mail) {
   if (Array.isArray(mail.attachment_names) && mail.attachment_names.length) {
     card.append(element('p', 'attachments', `Anhänge: ${mail.attachment_names.join(' · ')}`));
   }
-  if (mail.status === 'error') card.append(element('p', 'mail-error', mail.error || 'Diese Nachricht konnte nicht ausgewertet werden.'));
+  if (mail.status === 'error') {
+    const message = Object.hasOwn(mailErrorMessages, mail.error) ? mailErrorMessages[mail.error] : 'Diese Nachricht konnte nicht ausgewertet werden.';
+    card.append(element('p', 'mail-error', message));
+  }
   const reasons = Array.isArray(mail.review_reasons) ? mail.review_reasons : [];
   if (reasons.length || (needsReview(mail) && mail.status !== 'error')) {
     const note = element('div', 'review-notes');

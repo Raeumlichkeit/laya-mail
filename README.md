@@ -4,7 +4,7 @@ Lokale Weboberfläche zum Sortieren von Gmail-Nachrichten mit [Laya](https://git
 
 ## Funktionen
 
-- Pro Durchlauf insgesamt 1–100 Mails aus den ausgewählten Posteingängen laden; neue Stapel überspringen bereits angezeigte Nachrichten getrennt je Konto.
+- Pro Durchlauf insgesamt 1–100 Mails aus den ausgewählten Posteingängen laden; neue Stapel überspringen erfolgreich verarbeitete Nachrichten getrennt je Konto. Fehlgeschlagene Abrufe oder Label-Änderungen bleiben für den nächsten Stapel zugänglich.
 - **Alle Mails im Posteingang labeln**: Durchläuft sämtliche Seiten der ausgewählten aktiven Posteingänge, einschließlich bereits geladener Nachrichten. Dieser Knopf setzt Gmail-Labels unabhängig vom Sortier-Toggle. Passende gespeicherte Korrekturen haben Vorrang; mit „Nach aktueller Mail stoppen“ lässt sich der Lauf beenden. Bereits verarbeitete Ergebnisse bleiben erhalten. Archiv, Gesendet, Papierkorb und Gmail-Spamordner werden nicht einbezogen.
 - Inhalt: **Rechnung**, **Allgemeine Information**, **Werbung**, **Sonstiges**.
 - **Wichtig** und **Spamverdacht** werden unabhängig davon bewertet.
@@ -24,6 +24,8 @@ Im Standardmodus liest Laya Mail mit `gmail.readonly`. Bei aktiviertem Sortier-T
 Beim Aktualisieren werden die fünf verwalteten Gmail-Labels abgeglichen: Überholte Zuordnungen werden entfernt, andere Labels bleiben erhalten. Vor Schreibzugriffen wird geprüft, ob die Google-Anmeldung zum jeweiligen Postfach gehört. Bewertungen und Ladehistorie bleiben je Konto getrennt, auch wenn Nachrichten dieselbe ID haben.
 
 Während einer vollständigen Sortierung bleibt das Dashboard bedienbar; andere Sortierläufe warten bis zum Abschluss. Die Anzeige nennt verarbeitete Nachrichten und das aktuelle Postfach. Ein Stopp macht bereits gesetzte Labels nicht rückgängig. Der Alle-Lauf beginnt beim nächsten Start wieder von vorn.
+
+Bei Gmail-Ratenlimits und vorübergehenden Verbindungs- oder Serverfehlern werden Abrufe und Nachrichtenlabel-Änderungen mit zunehmenden Pausen wiederholt, höchstens sieben Versuche je Anfrage. Dadurch kann der Fortschritt kurz stehen bleiben; ein angeforderter Stopp wartet auf die laufende Nachricht. Bleibt das Ratenlimit bestehen oder ist das Tageskontingent erschöpft, endet der Stapel mit einem Teilbericht. Dauerhafte Berechtigungsfehler und verschwundene Nachrichten werden nicht wiederholt. Das folgt Googles [Hinweisen zur Fehlerbehandlung](https://developers.google.com/workspace/gmail/api/guides/handle-errors).
 
 ## Aufbau
 

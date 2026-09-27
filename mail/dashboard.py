@@ -36,6 +36,12 @@ PILOT_FAILURE_MESSAGES = {
     "account_mismatch": "Die Gmail-Anmeldung gehört nicht zum ausgewählten Postfach. Bitte die Kontozuordnung prüfen.",
     "label_initialization_failed": "Die Gmail-Labels konnten nicht vorbereitet werden. Bitte Schreibfreigabe und Verbindung prüfen.",
     "gmail_request_failed": "Gmail konnte nicht erreicht werden. Bitte Anmeldung und Verbindung prüfen.",
+    "gmail_rate_limited": "Gmail begrenzt gerade die Anfragen. Bitte später erneut versuchen.",
+    "gmail_quota_exceeded": "Das Gmail-Tageskontingent ist ausgeschöpft. Bitte nach dessen Zurücksetzung erneut versuchen.",
+    "gmail_temporary_error": "Gmail meldet einen vorübergehenden Fehler. Bitte später erneut versuchen.",
+    "gmail_message_not_found": "Die Nachricht ist bei Gmail nicht mehr verfügbar.",
+    "gmail_permission_denied": "Gmail hat den Zugriff abgelehnt. Bitte die Google-Freigabe prüfen.",
+    "gmail_authentication_failed": "Die Gmail-Anmeldung ist nicht mehr gültig. Bitte erneut bei Google anmelden.",
     "laya_key_missing": "Der API-Schlüssel für das ausgewählte Laya-Modell fehlt.",
     "output_directory_not_private": "Das Verzeichnis für die Auswertung ist nicht ausreichend geschützt. Bitte die Dateirechte prüfen.",
     "output_destination_unavailable": "Der neue Auswertungsbericht kann am vorgesehenen Ort nicht gespeichert werden.",
@@ -269,12 +275,17 @@ class Dashboard:
             owner = item.get("account_email") or (key.rsplit(":", 1)[0] if ":" in key else self.account)
             if owner.casefold() == account.casefold():
                 seen.add(item.get("message_id") or key.rsplit(":", 1)[-1])
-        for path in self.directory.glob("pilot-*.json"):
+        # The latest attempt wins: failed reads/labels must remain eligible for retry,
+        # even when an older run or a preserved review exists for the same message.
+        for path in sorted(self.directory.glob("pilot-*.json"), key=lambda p: (p.stat().st_mtime_ns, p.name)):
             previous = json.loads(path.read_text(encoding="utf-8"))
             for row in previous["messages"]:
                 owner = row.get("account_email") or previous.get("account_email") or self.account
                 if row.get("message_id") and owner.casefold() == account.casefold():
-                    seen.add(row["message_id"])
+                    if row.get("status") == "suggestion" and not row.get("label_error"):
+                        seen.add(row["message_id"])
+                    else:
+                        seen.discard(row["message_id"])
         return seen
 
     def review_report(self):
@@ -292,7 +303,7 @@ class Dashboard:
                 row["needs_review"] = False
                 reviewed += item["action"] in {"accepted", "corrected"}
                 skipped += item["action"] == "skipped"
-            elif item:
+            elif item and fingerprint is not None:
                 row["review_reasons"].append("Die frühere Bewertung gilt für eine andere Texteingabe; bitte erneut prüfen.")
                 row["needs_review"] = True
         distribution = {"inhalt": {k: 0 for k in sorted(LABELS["inhalt"])},

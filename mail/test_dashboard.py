@@ -22,6 +22,54 @@ class DashboardCheck(unittest.TestCase):
         self.health_patch.start()
         self.addCleanup(self.health_patch.stop)
 
+    def test_failed_fetch_preserves_feedback_without_changed_input_warning(self):
+        with tempfile.TemporaryDirectory() as folder:
+            directory = Path(folder)
+            (directory / "dashboard-key").write_text("synthetic-test-key-not-a-real-credential")
+            (directory / "token.json").write_text("{}")
+            row = {
+                "message_id": "abc123", "status": "suggestion",
+                "suggestions": {"inhalt": "rechnung", "wichtig": "ja", "spamverdacht": "nein"},
+                "model_input": {
+                    "model": "multilingual", "state": "Synthetische Testrechnung",
+                    "questions": {name: {"type": "choice", "instructions": name,
+                                         "criteria": {option: option for option in sorted(choices)}}
+                                  for name, choices in LABELS.items()},
+                },
+            }
+            report = {"input_version": "mail-v2", "status": "complete", "messages": [row]}
+            report_path = directory / "pilot-test.json"
+            report_path.write_text(json.dumps(report))
+            app = Dashboard(directory, "test@example.invalid", "http://127.0.0.1:8000/v1/systemone")
+            original = app.review_report()["messages"][0]
+            app.save_feedback({"report_id": report_path.name, "message_id": row["message_id"],
+                               "snapshot_id": original["snapshot_id"], "action": "accepted"})
+            saved_feedback = (directory / "feedback.json").read_bytes()
+            saved_export = app.training_export()
+            report["messages"] = [{"message_id": row["message_id"], "status": "error",
+                                   "error": "gmail_request_failed"}]
+            report_path.write_text(json.dumps(report))
+
+            failed = app.review_report()
+            failed_row = failed["messages"][0]
+            self.assertIsNone(failed_row["snapshot_id"])
+            self.assertIsNone(failed_row["review"])
+            self.assertFalse(failed_row["training_ready"])
+            self.assertTrue(failed_row["needs_review"])
+            self.assertEqual(failed_row["review_reasons"], ["Technischer Fehler bei der Auswertung"])
+            self.assertEqual(failed["summary"]["training_examples"], 1)
+            self.assertEqual((directory / "feedback.json").read_bytes(), saved_feedback)
+            self.assertEqual(app.training_export(), saved_export)
+
+            # An available, genuinely changed input must still invalidate the displayed review.
+            row["model_input"]["state"] += " Anderer Text"
+            report["messages"] = [row]
+            report_path.write_text(json.dumps(report))
+            changed = app.review_report()["messages"][0]
+            self.assertIsNone(changed["review"])
+            self.assertIn("Die frühere Bewertung gilt für eine andere Texteingabe; bitte erneut prüfen.",
+                          changed["review_reasons"])
+
     def test_private_http_and_review_queue(self):
         with tempfile.TemporaryDirectory() as folder:
             directory = Path(folder)
@@ -139,7 +187,8 @@ class DashboardCheck(unittest.TestCase):
                         self.assertEqual(app.status()["batch_mode"], "next")
                         self.assertEqual(app.status()["requested_limit"], 7)
                         self.assertEqual(app.status()["total"], 7)
-                        self.assertEqual(json.loads(app.seen_path(app.account).read_text()), ["abc123", "def456"])
+                        # Failed historical rows remain eligible for another fetch.
+                        self.assertEqual(json.loads(app.seen_path(app.account).read_text()), ["abc123"])
                         self.assertEqual((directory / "feedback.json").read_bytes(), before)
                         worker.assert_called_once_with("next", 7)
                         release.set()

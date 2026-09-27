@@ -1,6 +1,6 @@
 """Unit tests for mail/labeler.py."""
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 import requests
 
 from labeler import (
@@ -144,7 +144,7 @@ class LabelerTests(unittest.TestCase):
             get_or_create_labels(session)
         self.assertNotIn("PRIVATE", str(ctx.exception))
         session.post.side_effect = requests.ConnectionError("PRIVATE_AUTHORIZATION_HEADER")
-        with self.assertRaises(LabelerError) as ctx:
+        with patch("gmail_http.time.sleep"), self.assertRaises(LabelerError) as ctx:
             apply_labels(session, "msg_123", {"inhalt": "info", "wichtig": "nein", "spamverdacht": "nein"}, self.cache)
         self.assertEqual(str(ctx.exception), "modify_request_failed")
 

@@ -1,5 +1,6 @@
 """Regression checks for mailbox isolation and the shared manual/live worker."""
 import json
+import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -136,6 +137,27 @@ class RoutingCheck(unittest.TestCase):
         with patch("dashboard.subprocess.run", side_effect=full_pilot):
             self.app.run("next", 3)
         self.assertEqual(len(self.app.report()["messages"]), 3)
+
+    def test_latest_failed_attempt_remains_retryable_without_losing_reviews(self):
+        self.set_report([message(PRIMARY), message(SECONDARY)])
+        report = self.app.review_report()
+        self.app.save_feedback({"message_id": "abc123", "account_email": PRIMARY,
+                                "report_id": report["report_id"], "action": "accepted",
+                                "snapshot_id": report["messages"][0]["snapshot_id"]})
+        feedback_before = json.dumps(self.app.feedback, sort_keys=True)
+        os.utime(self.app.report_path, (100, 100))
+        failed_path = self.directory / "pilot-later.json"
+        for failed_row in (
+            {"message_id": "abc123", "account_email": PRIMARY, "status": "error", "error": "gmail_rate_limited"},
+            {**message(PRIMARY), "label_error": "Label request failed"},
+        ):
+            save_report(failed_path, {"messages": [failed_row]})
+            os.utime(failed_path, (200, 200))
+            self.assertNotIn("abc123", self.app.seen_ids(PRIMARY))
+            self.assertIn("abc123", self.app.seen_ids(SECONDARY))
+            self.assertEqual(json.dumps(self.app.feedback, sort_keys=True), feedback_before)
+        save_report(failed_path, {"messages": [message(PRIMARY)]})
+        self.assertIn("abc123", self.app.seen_ids(PRIMARY))
 
     def test_live_uses_shared_worker_and_disabled_selection_does_not_fallback(self):
         with patch.object(self.app, "start", return_value=True) as start:

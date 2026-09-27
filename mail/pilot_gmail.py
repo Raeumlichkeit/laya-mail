@@ -27,6 +27,11 @@ from google.auth.transport.requests import AuthorizedSession
 from google.oauth2.credentials import Credentials
 import requests
 
+try:
+    from gmail_http import error_code, request_with_retry
+except ImportError:
+    from mail.gmail_http import error_code, request_with_retry
+
 
 READONLY_SCOPE = "https://www.googleapis.com/auth/gmail.readonly"
 MODIFY_SCOPE = "https://www.googleapis.com/auth/gmail.modify"
@@ -184,9 +189,14 @@ def mail_text(message):
 
 
 def gmail_get(session, path, **params):
-    response = session.get(GMAIL + path, params=params, timeout=30, allow_redirects=False)
+    try:
+        response = request_with_retry(session, "GET", GMAIL + path, params=params, timeout=30)
+    except (requests.Timeout, requests.ConnectionError):
+        raise PilotError("gmail_temporary_error") from None
+    except requests.RequestException:
+        raise PilotError("gmail_request_failed") from None
     if response.status_code != 200:
-        raise PilotError("gmail_request_failed")
+        raise PilotError(error_code(response))
     data = response.json()
     if not isinstance(data, dict):
         raise PilotError("gmail_response_invalid")
@@ -420,8 +430,10 @@ def run_pilot(gmail_session, laya_session, expected_account, laya_url, key, prog
                     effective = matching_review(row, reviews) or suggestions
                     applied = apply_labels(gmail_session, message_id, effective, label_cache, archive=False)
                     row["applied_labels"] = applied
-                except Exception:
+                except Exception as error:
                     row["label_error"] = "Die Gmail-Labels konnten nicht aktualisiert werden."
+                    if str(error) in {"gmail_rate_limited", "gmail_quota_exceeded"}:
+                        row["label_error_code"] = str(error)
         except PilotError as error:
             row["error"] = str(error)
         except requests.RequestException:
@@ -431,6 +443,9 @@ def run_pilot(gmail_session, laya_session, expected_account, laya_url, key, prog
         rows.append(row)
         if progress is not None:
             progress(len(rows), len(entries))
+        if (row.get("error") in {"gmail_rate_limited", "gmail_quota_exceeded"}
+                or row.get("label_error_code") in {"gmail_rate_limited", "gmail_quota_exceeded"}):
+            break  # Preserve the partial report instead of exhausting retries for every remaining mail.
     stop_requested()
     return {
         "created_utc": datetime.now(timezone.utc).isoformat(),

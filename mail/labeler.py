@@ -1,6 +1,11 @@
 """Gmail label management and automatic sorting for Laya Mail."""
 import requests
 
+try:
+    from gmail_http import error_code, request_with_retry
+except ImportError:
+    from mail.gmail_http import error_code, request_with_retry
+
 GMAIL = "https://gmail.googleapis.com/gmail/v1/users/me"
 
 # Gmail rejects its localized system-label name "Wichtig" as a custom label.
@@ -36,9 +41,9 @@ def managed_label_ids(label_cache):
 def get_or_create_labels(session):
     """Fetch existing Gmail labels and create required Laya sorting labels if missing."""
     try:
-        res = session.get(f"{GMAIL}/labels", timeout=15, allow_redirects=False)
+        res = request_with_retry(session, "GET", f"{GMAIL}/labels", timeout=15)
         if res.status_code != 200:
-            raise LabelerError(f"labels_list_failed_status_{res.status_code}")
+            raise LabelerError(error_code(res))
         existing = {lbl.get("name", ""): lbl.get("id") for lbl in res.json().get("labels", [])}
     except LabelerError:
         raise
@@ -62,15 +67,17 @@ def get_or_create_labels(session):
                 label_cache[key] = create_res.json()["id"]
             elif create_res.status_code == 409:  # Already exists
                 # Re-fetch ID
-                response = session.get(f"{GMAIL}/labels", timeout=15, allow_redirects=False)
+                response = request_with_retry(session, "GET", f"{GMAIL}/labels", timeout=15)
                 if response.status_code != 200:
-                    raise LabelerError(f"labels_list_failed_status_{response.status_code}")
+                    raise LabelerError(error_code(response))
                 re_fetch = response.json()
                 for lbl in re_fetch.get("labels", []):
                     if lbl.get("name") == name:
                         label_cache[key] = lbl["id"]
                         break
             else:
+                if error_code(create_res) in {"gmail_rate_limited", "gmail_quota_exceeded"}:
+                    raise LabelerError(error_code(create_res))
                 if create_res.status_code == 403:
                     raise LabelerError(
                         f"Keine Berechtigung zum Erstellen des Labels '{name}' (Status 403). "
@@ -115,16 +122,18 @@ def apply_labels(session, message_id, suggestions, label_cache, archive=False):
     payload = {"addLabelIds": [managed[key] for key in keys_to_add],
                "removeLabelIds": [value for key, value in managed.items() if key not in keys_to_add]}
     try:
-        res = session.post(f"{GMAIL}/messages/{message_id}/modify", json=payload, timeout=15, allow_redirects=False)
+        res = request_with_retry(session, "POST", f"{GMAIL}/messages/{message_id}/modify", json=payload, timeout=15)
     except requests.RequestException:
         raise LabelerError("modify_request_failed") from None
+    if error_code(res) in {"gmail_rate_limited", "gmail_quota_exceeded"}:
+        raise LabelerError(error_code(res))
     if res.status_code == 403:
         raise LabelerError(
             "Keine Berechtigung zum Ändern der E-Mail-Labels (Status 403). "
             "Der Gmail-Token benötigt Schreibrechte (gmail.modify)."
         )
     if res.status_code != 200:
-        raise LabelerError(f"modify_failed_status_{res.status_code}")
+        raise LabelerError(error_code(res))
 
     return [LABEL_MAP[key] for key in keys_to_add]
 

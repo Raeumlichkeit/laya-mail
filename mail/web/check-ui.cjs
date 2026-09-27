@@ -139,6 +139,21 @@ async function press(key, target = new Node('body'), options = {}) {
 
 (async () => {
   await new Promise(setImmediate);
+  for (const [code, expected] of [
+    ['gmail_rate_limited', 'Gmail begrenzt derzeit die Anfragen. Bitte später erneut versuchen.'],
+    ['gmail_quota_exceeded', 'Das Gmail-Tageskontingent ist ausgeschöpft. Bitte nach dessen Zurücksetzung erneut versuchen.'],
+    ['gmail_temporary_error', 'Gmail meldet einen vorübergehenden Fehler. Bitte später erneut versuchen.'],
+    ['gmail_message_not_found', 'Diese Nachricht ist in Gmail nicht mehr verfügbar.'],
+    ['gmail_authentication_failed', 'Die Gmail-Anmeldung ist nicht mehr gültig. Bitte erneut anmelden.'],
+    ['gmail_permission_denied', 'Gmail hat den Zugriff auf diese Nachricht verweigert. Bitte die Anmeldung prüfen.'],
+    ['gmail_request_failed', 'Diese Nachricht konnte nicht von Gmail geladen werden.'],
+    [hostile, 'Diese Nachricht konnte nicht ausgewertet werden.'],
+    ['toString', 'Diese Nachricht konnte nicht ausgewertet werden.'],
+    [undefined, 'Diese Nachricht konnte nicht ausgewertet werden.'],
+  ]) {
+    const card = context.renderMail({ message_id: 'synthetic-error', status: 'error', error: code });
+    assert.equal(card.querySelector('.mail-error').textContent, expected, 'Mail errors use fixed German messages, never raw server text');
+  }
   assert.equal(get('message-count').textContent, '3');
   assert.equal(get('run-label').textContent, 'Neueste 20 erneut prüfen');
   assert.equal(get('run-next').disabled, false);
