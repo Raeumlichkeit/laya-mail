@@ -174,7 +174,7 @@ async function press(key, target = new Node('body'), options = {}) {
   await context.refreshStatus();
   assert.equal(get('processing-note').hidden, true, 'A cleared fallback note disappears');
   assert.equal(get('account-select').children.length, 3);
-  assert.equal(get('account-select').children[2].textContent, 'second@example.invalid ⚠️');
+  assert.equal(get('account-select').children[2].textContent, 'second@example.invalid (Anmeldung fehlt)');
   get('account-select').value = 'second';
   await get('account-select').handlers.change({ target: get('account-select') });
   assert.deepEqual(controlPayload, { selected: 'second' });
@@ -198,6 +198,9 @@ async function press(key, target = new Node('body'), options = {}) {
   assert.equal(walk(legacy).find((node) => node.textContent === 'Überspringen').disabled, false);
 
   context.startCorrection(base.messages[0]);
+  assert.equal(get('focus-review').disabled, true, 'Review jump must not hide an open correction');
+  get('focus-review').handlers.click();
+  assert.equal(vm.runInContext('filter', context), 'all');
   assert.equal(get('run').disabled, true, 'Latest action must be locked during correction');
   assert.equal(get('run-next').disabled, true, 'Next action must be locked during correction');
   assert.equal(get('mail-limit').disabled, true, 'Count must be locked during correction');
@@ -225,6 +228,11 @@ async function press(key, target = new Node('body'), options = {}) {
   assert.equal(vm.runInContext('editing', context), null);
   assert.equal(serverReport.messages[0].suggestions.inhalt, 'rechnung', 'Original suggestion remains intact');
   context.selectFilter('werbung'); assert.equal(get('messages').children.length, 1);
+  get('search').value = 'unpassender Suchbegriff';
+  get('focus-review').handlers.click();
+  assert.equal(get('search').value, '');
+  assert.equal(vm.runInContext('filter', context), 'review');
+  assert.equal(context.document.activeElement, get('mail-heading'));
   context.selectFilter('review'); assert.equal(get('messages').children.length, 1);
   context.selectFilter('unreviewed'); assert.equal(get('messages').children.length, 2);
 

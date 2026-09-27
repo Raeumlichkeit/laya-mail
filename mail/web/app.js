@@ -133,6 +133,7 @@ function renderStatus() {
   $('mail-limit').disabled = locked;
   $('run-all').disabled = locked;
   $('account-select').disabled = locked;
+  $('focus-review').disabled = Boolean(editing) || saving || !reportLoaded;
   $('stop-run').hidden = !(running && status?.batch_mode === 'all');
   $('stop-run').disabled = stopping || Boolean(status?.stop_requested);
   $('stop-run').textContent = stopping || status?.stop_requested ? 'Stoppen …' : 'Nach aktueller Mail stoppen';
@@ -324,7 +325,7 @@ function renderMail(mail) {
   }
   if (Array.isArray(mail.applied_labels) && mail.applied_labels.length) {
     for (const applied of mail.applied_labels) {
-      labels.append(element('span', 'label label-applied', `🏷️ ${applied}`));
+      labels.append(element('span', 'label label-applied', `Gmail: ${applied}`));
     }
   }
   const suggestions = mail.suggestions || {};
@@ -540,7 +541,7 @@ function renderAccounts(data) {
   for (const acc of data.accounts) {
     const opt = document.createElement('option');
     opt.value = acc.id;
-    opt.textContent = `${acc.email}${acc.token_exists ? '' : ' ⚠️'}`;
+    opt.textContent = `${acc.email}${acc.token_exists ? '' : ' (Anmeldung fehlt)'}`;
     select.append(opt);
   }
   select.value = currentVal;
@@ -621,6 +622,13 @@ function selectFilter(value) {
 
 document.querySelectorAll('[data-filter]').forEach((button) => button.addEventListener('click', () => selectFilter(button.dataset.filter)));
 $('search').addEventListener('input', renderMessages);
+$('focus-review').addEventListener('click', () => {
+  if (editing || saving || !reportLoaded) return;
+  $('search').value = '';
+  selectFilter('review');
+  $('mail-heading').scrollIntoView({ block: 'start' });
+  $('mail-heading').focus({ preventScroll: true });
+});
 $('reset-filters').addEventListener('click', () => { $('search').value = ''; selectFilter('all'); });
 $('return-correction').addEventListener('click', () => {
   $('search').value = '';
@@ -690,7 +698,7 @@ $('btn-apply-current')?.addEventListener('click', async () => {
     if (res.status === 'ok') {
       const errNote = res.errors && res.errors.length ? ` (${res.errors.join('; ')})` : '';
       if (res.applied_count === 0 && res.errors && res.errors.length) {
-        showError(`⚠️ Keine E-Mails gelabelt: ${res.errors.join('; ')}`);
+        showError(`Keine E-Mails gelabelt: ${res.errors.join('; ')}`);
       } else {
         showError(`✓ ${res.applied_count} von ${res.total_messages} E-Mails erfolgreich in Gmail gelabelt!${errNote}`);
       }

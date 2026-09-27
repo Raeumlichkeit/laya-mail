@@ -65,7 +65,7 @@ Die Google-Freigabe auf dem Rechner durchführen, auf dem auch der Browser geöf
 
 Die im Terminal angezeigte Google-Adresse persönlich im Browser öffnen und die Leseberechtigung freigeben. Der Helfer überschreibt keine bestehende Tokendatei. Bei getrennten Rechnern `token.json` anschließend über eine geschützte Verbindung auf den Dashboard-Rechner übertragen. Für eine bereits eingerichtete Installation können die vorhandenen privaten Dateien weiterverwendet werden; keine neue Google-Freigabe allein wegen dieses Repositorys erforderlich.
 
-Für Gmail-Labels benötigt jedes betroffene Konto eine Freigabe mit `--modify`. Eine vorhandene reine Lesefreigabe reicht dafür nicht. Weitere Konten zuerst im Dashboard hinzufügen; den dort angegebenen Token-Dateinamen für die jeweilige Autorisierung verwenden.
+Für Gmail-Labels benötigt jedes betroffene Konto eine Freigabe mit `--modify`. Eine vorhandene reine Lesefreigabe reicht dafür nicht. Weitere Konten lassen sich über die geführte Einrichtung unten verbinden.
 
 Starten, dabei Adresse und Modell-URL anpassen:
 
@@ -79,6 +79,26 @@ Starten, dabei Adresse und Modell-URL anpassen:
 ```
 
 Dann `http://127.0.0.1:8001` öffnen und den Code aus `runtime/private/dashboard-key` eingeben. Für andere Geräte im Heimnetz `--host` auf die konkrete LAN-IP des Servers setzen und exakt diese Adresse im Browser verwenden. Das Dashboard ist für ein vertrauenswürdiges Heimnetz gedacht, nicht für eine öffentliche Portfreigabe; HTTP verschlüsselt die Verbindung nicht.
+
+## Ein weiteres Gmail-Konto verbinden
+
+Einmalig `deploy/account-setup.example.json` als `account-setup.json` im privaten Datenverzeichnis des Dashboard-Servers ablegen. Die vier Windows-Pfade müssen auf die vorhandene Python-Umgebung, `mail/authorize_gmail.py`, den bestehenden Desktop-OAuth-Client und einen privaten Ausgabeordner auf dem PC zeigen. Die bestehende Google-Projekt-ID und Client-ID eintragen; die Client-ID ist kein Geheimnis. Die Datei enthält keine Client-Secrets. Unter Windows muss der Ausgabeordner bereits existieren und per ACL nur dem eigenen Benutzer und SYSTEM zugänglich sein.
+
+1. Im Dashboard **Konto hinzufügen** öffnen, Gmail-Adresse eingeben und **Nur lesen** oder **Gmail-Labels** wählen. Es wird noch kein Konto angelegt und keine Berechtigung verändert.
+2. Den angezeigten Befehl in PowerShell auf dem Windows-PC ausführen. Die Google-Adresse aus dem Terminal im Browser desselben PCs öffnen, das richtige Konto auswählen und persönlich freigeben. Falls das vorhandene Google-Projekt im Testmodus diese Adresse noch nicht kennt, sie vorher auf der verlinkten Zielgruppen-Seite als Testnutzer ergänzen. Ein neues Cloud-Projekt oder ein weiterer OAuth-Client ist nicht nötig.
+3. Die neu erzeugte JSON-Anmeldedatei im Dashboard auswählen und **Verbindung prüfen** starten. Der Server erneuert die Anmeldung, prüft Googles bestätigte Berechtigungen und vergleicht die Adresse über das Gmail-Profil. Dabei werden keine Nachrichten gelesen oder Labels geändert. Erst danach wird das neue Konto aktiviert; vorhandene Anmeldungen werden nicht überschrieben. Während laufender Auswertungen wartet die Einrichtung.
+
+Der Import überträgt eine vertrauliche Google-Anmeldung. Beim vorhandenen LAN-HTTP-Zugang ist diese Übertragung unverschlüsselt; dafür ausschließlich das vertrauenswürdige Heimnetz nutzen. Für andere Netze den Zugang zuerst geschützt bereitstellen oder die Datei per SSH übertragen. Die Datei niemals in Chats, Git oder öffentliche Ablagen kopieren. Bei fehlender Pfadkonfiguration zeigt die Einrichtung eine entsprechende Meldung; der OAuth-Helfer kann weiterhin mit den obigen Argumenten manuell gestartet und seine JSON-Datei anschließend geprüft werden.
+
+Vor dem Verbinden den **Live-Modus** in der Übersicht ausschalten. Während der Verbindungsprüfung lässt er sich nicht einschalten. Die Verbindung wählt kein anderes Postfach aus und startet keinen Lauf. Bei Auswahl **Alle Konten** ist das neue aktivierte Konto ab dem nächsten selbst gestarteten Durchlauf enthalten; Live kann danach bewusst wieder eingeschaltet werden. Eine reine Lesefreigabe reicht weiterhin nicht für eingeschaltete Gmail-Sortierung.
+
+### Wiederherstellung bei vorhandener Anmeldedatei (409)
+
+Das Entfernen eines Kontos aus der Übersicht löscht dessen private Anmeldedatei absichtlich nicht. Deshalb kann erneutes Verbinden mit „Für dieses Konto liegt bereits eine Anmeldedatei vor“ abbrechen. Der Import überschreibt sie nicht.
+
+1. Live ausschalten, laufende Vorgänge abschließen lassen und `accounts.json` sowie die betroffene Anmeldedatei privat sichern. Keine Tokeninhalte im Terminal, Browser oder Chat ausgeben.
+2. Auf dem Server die Zuordnung in `accounts.json` prüfen. Verweist noch ein Konto auf diese Datei, das vorhandene Konto verwenden und die Datei an ihrem Platz lassen. Neue Imports speichern unter `token_<erste 16 SHA256-Hexzeichen der kleingeschriebenen, außen getrimmten Adresse>.json`; die Windows-Ausgabedatei hat zusätzlich einen zufälligen Suffix. Bei unklarer Zuordnung die Einrichtung hier anhalten.
+3. Nur wenn die eindeutig zugeordnete Datei von keinem Kontoeintrag mehr verwendet wird und das Konto neu verbunden werden soll: die einzelne verwaiste Datei in ein neu angelegtes privates Sicherungsverzeichnis verschieben, mit Verzeichnisrechten `0700` und Dateirechten `0600` unter Ubuntu. Kein vorhandenes Sicherungsziel überschreiben und keine anderen Tokendateien verschieben. Danach die geführte Einrichtung mit einer neu erzeugten Google-Freigabe wiederholen. Die alte Datei bis zur erfolgreichen Verbindung als private Sicherung behalten.
 
 ## GPU auf einem zweiten Rechner
 
@@ -109,6 +129,7 @@ Die Tests verwenden synthetische Nachrichten, keine Google-Anmeldung und kein ge
 .venv/bin/python -m unittest discover -s mail -v
 .venv/bin/python -m unittest discover -s gpu -v
 node mail/web/check-ui.cjs
+node mail/web/check-onboarding.cjs
 ```
 
 Node.js wird nur für den UI-Test benötigt; die Oberfläche braucht keinen Build-Schritt. Geprüft werden unter anderem Lesebeschränkungen, OAuth-Konfiguration, Anmeldung, Herkunftsprüfung, Stapelgrößen, Pagination, GPU-Auswahl, gespeicherte Korrekturen, Trainingsdatenexport und sicheres Anzeigen von Mailtext.

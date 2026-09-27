@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Postfach verbinden · Laya Mail</title>
+  <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="/onboarding.css">
+  <script src="/onboarding.js" defer></script>
+</head>
+<body class="onboarding-page">
+  <header class="site-header"><div class="header-inner">
+    <a class="brand" href="/" aria-label="Laya Mail Übersicht"><span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M6 4v16h13M11 4v11h8"/></svg></span><span>Laya <span class="brand-light">Mail</span></span></a>
+    <a class="setup-back-link" href="/"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 5-7 7 7 7M5 12h14"/></svg> Zur Übersicht</a>
+  </div></header>
+  <main class="setup-main">
+    <div class="setup-heading"><h1>Ein weiteres Postfach. Alles im Blick.</h1><p>Wir führen dich durch die Gmail-Verbindung. Deine vorhandenen Postfächer bleiben unverändert.</p></div>
+    <nav class="setup-stepper" aria-label="Fortschritt der Kontoeinrichtung">
+      <ol>
+        <li id="step-marker-1" aria-current="step"><span class="step-index">1</span><span>Postfach wählen</span></li>
+        <li id="step-marker-2"><span class="step-index">2</span><span>Google freigeben</span></li>
+        <li id="step-marker-3"><span class="step-index">3</span><span>Verbindung prüfen</span></li>
+      </ol>
+    </nav>
+    <div class="setup-layout">
+      <div class="setup-workspace">
+        <p id="setup-loading" class="setup-status" role="status">Einrichtung wird vorbereitet …</p>
+        <div id="setup-error" class="setup-error" role="alert" hidden></div>
+        <section id="setup-unavailable" class="setup-pane" hidden aria-labelledby="unavailable-heading">
+          <h2 id="unavailable-heading">Die Einrichtung braucht noch einen Schritt.</h2>
+          <p id="unavailable-reason">Die Verbindungshilfe ist auf diesem Laya-Server noch nicht eingerichtet.</p>
+          <p>Die Windows-Pfade und das Google-Projekt müssen einmal in der Serverkonfiguration hinterlegt werden. Deine bestehenden Konten funktionieren weiterhin.</p>
+          <a class="secondary-button" href="https://github.com/Raeumlichkeit/laya-mail#ein-weiteres-gmail-konto-verbinden" target="_blank" rel="noopener noreferrer">Einrichtungsanleitung öffnen</a>
+          <button type="button" id="setup-reload" class="text-button">Erneut prüfen</button>
+        </section>
+        <section id="setup-step-1" class="setup-pane" hidden aria-labelledby="step-one-heading">
+          <h2 id="step-one-heading" tabindex="-1">Welches Postfach kommt dazu?</h2>
+          <p>Du kannst Gmail-Adressen und Google-Workspace-Postfächer verbinden. Andere Mailanbieter werden hier noch nicht unterstützt.</p>
+          <form id="account-form">
+            <label class="setup-field" for="setup-email"><span>E-Mail-Adresse</span><input id="setup-email" type="email" autocomplete="email" inputmode="email" placeholder="dein.name@gmail.com" maxlength="254" required aria-describedby="email-help"></label>
+            <p id="email-help" class="field-help">Wähle später bei Google genau diese Adresse aus.</p>
+            <fieldset class="permission-options"><legend>Was soll Laya mit diesem Postfach können?</legend>
+              <label class="permission-option"><input type="radio" name="permission" value="readonly" checked><span><strong>Erst einmal nur lesen</strong><span>Vorschläge ansehen und bewerten. Keine Gmail-Labels ändern.</span></span></label>
+              <label class="permission-option"><input type="radio" name="permission" value="modify"><span><strong>Lesen und Labels setzen</strong><span>Laya kann Mails in Gmail einordnen. Google nennt diese Freigabe „gmail.modify“.</span></span></label>
+            </fieldset>
+            <p class="setup-fineprint">Die Google-Freigabe bestätigst du selbst. Schalte einen aktiven Live-Modus vor dem Verbinden in der Übersicht aus. Das Hinzufügen startet noch keine Auswertung.</p>
+            <div class="setup-actions"><button id="prepare-account" type="submit" class="primary-button">Weiter zur Google-Freigabe <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14m-7-7 7 7-7 7"/></svg></button></div>
+          </form>
+        </section>
+        <section id="setup-step-2" class="setup-pane" hidden aria-labelledby="step-two-heading">
+          <h2 id="step-two-heading" tabindex="-1">Gib Laya bei Google Zugriff.</h2>
+          <p>Führe diesen Schritt auf deinem Windows-Hauptrechner aus. Dort sind die Verbindungshilfe und dein Google-Projekt bereits eingerichtet.</p>
+          <div class="setup-account-summary"><span>Gewähltes Postfach</span><strong id="grant-account"></strong><span id="grant-permission"></span></div>
+          <ol class="instruction-list">
+            <li><strong>Öffne PowerShell auf deinem Hauptrechner.</strong><p>Normale Benutzerrechte reichen. Kopiere den vorbereiteten Befehl hinein und drücke Enter.</p></li>
+          </ol>
+          <div class="command-box"><div class="command-toolbar"><span>PowerShell</span><button id="copy-command" class="text-button" type="button">Befehl kopieren</button></div><pre id="setup-command" tabindex="0"></pre><p id="copy-status" class="field-help" role="status"></p></div>
+          <ol class="instruction-list" start="2">
+            <li><strong>Öffne den Google-Link aus PowerShell.</strong><p>Wähle <strong id="google-account"></strong> aus und bestätige die angezeigte Freigabe. Nach der Rückmeldung von Google kannst du dieses Tutorial fortsetzen.</p></li>
+            <li><strong>Lass die erzeugte Datei auf deinem PC.</strong><p>PowerShell speichert deine Freigabe als <code id="grant-filename"></code>. Der Speicherort steht im Befehl hinter <code>--token</code>. Im nächsten Schritt wählst du diese Datei aus.</p></li>
+          </ol>
+          <details class="setup-help"><summary>Google meldet „Zugriff blockiert“ oder „App im Testmodus“?</summary><p>Wenn „Laya Mail“ im Testmodus läuft, muss die neue Adresse im bestehenden Google-Projekt als Testnutzer eingetragen sein. Öffne die Zielgruppe des Projekts mit deinem Projektkonto und füge die Adresse unter „Testnutzer“ hinzu. Starte danach den Befehl erneut.</p><a id="google-console-link" href="https://console.cloud.google.com/auth/audience" target="_blank" rel="noopener noreferrer">Testnutzer in Google Cloud verwalten</a><p>Weitere Hilfe: <a href="https://developers.google.com/workspace/gmail/api/quickstart/python" target="_blank" rel="noopener noreferrer">Googles Anleitung zur Gmail-Freigabe</a>.</p></details>
+          <details class="setup-help"><summary>Ich habe bereits eine Freigabedatei.</summary><p>Du kannst direkt zur Prüfung gehen. Benötigt wird die durch Googles Anmeldung erzeugte Token-Datei für dieses Postfach, nicht die OAuth-Client-Konfiguration und kein Passwort.</p></details>
+          <div class="setup-actions"><button id="back-to-account" type="button" class="secondary-button">Zurück</button><button id="grant-ready" type="button" class="primary-button">Weiter zur Verbindungsprüfung <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14m-7-7 7 7-7 7"/></svg></button></div>
+        </section>
+        <section id="setup-step-3" class="setup-pane" hidden aria-labelledby="step-three-heading">
+          <h2 id="step-three-heading" tabindex="-1">Ein letzter Check. Dann ist es verbunden.</h2>
+          <p>Wähle die gerade erzeugte JSON-Datei aus. Laya prüft bei Google, ob sie zum gewählten Postfach und zur gewünschten Freigabe gehört.</p>
+          <form id="connect-form">
+            <label class="setup-field file-field" for="grant-file"><span>Google-Freigabedatei (.json)</span><input id="grant-file" type="file" accept=".json,application/json" required aria-describedby="file-help"></label>
+            <p id="file-help" class="field-help">Die Datei wird an deinen lokalen Laya-Server übertragen. Ihr Inhalt wird nicht in der Oberfläche angezeigt.</p>
+            <div class="connection-target"><span>Verbindung für</span><strong id="connection-email"></strong><span id="connection-permission"></span></div>
+            <p id="connection-status" class="setup-status" role="status" hidden></p>
+            <div class="setup-actions"><button id="back-to-grant" type="button" class="secondary-button">Zurück</button><button id="connect-account" type="submit" class="primary-button">Datei prüfen &amp; verbinden</button></div>
+          </form>
+        </section>
+        <section id="setup-success" class="setup-pane setup-success" hidden aria-labelledby="success-heading">
+          <svg class="connection-check" viewBox="0 0 64 64" aria-hidden="true"><circle cx="32" cy="32" r="27"/><path d="m18 32 10 10 20-22"/></svg>
+          <h2 id="success-heading" tabindex="-1">Dein Postfach ist verbunden.</h2>
+          <p><strong id="connected-email"></strong> steht jetzt in der Kontoauswahl bereit.</p>
+          <p id="connected-permission"></p>
+          <p>Wähle es in der Übersicht aus und lade einen ersten kleinen Stapel. Es wurden noch keine Mails ausgewertet oder gelabelt.</p>
+          <div class="setup-actions"><a href="/" class="primary-button">Zur Postfachübersicht</a><button id="connect-another" class="secondary-button" type="button">Weiteres Konto verbinden</button></div>
+        </section>
+      </div>
+      <aside class="setup-guide" aria-label="Hinweise zur Verbindung">
+        <svg class="connection-diagram" viewBox="0 0 280 92" role="img" aria-label="Google-Freigabe verbindet dein Postfach mit dem lokalen Laya-Server"><rect x="2" y="21" width="62" height="50" rx="10"/><path d="m14 35 19 14 19-14M14 57V35h38v22H14M82 46h33m-7-6 7 6-7 6"/><circle cx="141" cy="46" r="18"/><path d="m133 46 6 6 11-12M166 46h33m-7-6 7 6-7 6"/><rect x="216" y="21" width="62" height="50" rx="10"/><path d="M229 35h36v10h-36zm0 18h36v8h-36M236 40h1m-1 17h1"/></svg>
+        <h2>Du gibst den Zugriff frei.</h2>
+        <p>Dein Google-Passwort bleibt bei Google. Laya erhält eine Freigabedatei und speichert sie privat auf deinem Server.</p>
+        <dl><div><dt>Unterstützt</dt><dd>Gmail &amp; Google Workspace</dd></div><div><dt>Kontoprüfung</dt><dd>Adresse und Berechtigung</dd></div><div><dt>Erster Abruf</dt><dd>Erst nach deinem Start</dd></div></dl>
+        <p class="setup-fineprint">Du kannst die Einrichtung jederzeit verlassen. Eine Verbindung wird erst nach erfolgreicher Prüfung gespeichert.</p>
+      </aside>
+    </div>
+  </main>
+</body>
+</html>

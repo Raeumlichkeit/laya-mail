@@ -20,6 +20,7 @@ from urllib.parse import parse_qs, urlsplit
 import requests
 
 from pilot_gmail import save_report, gmail_get, INPUT_VERSION, QUESTIONS
+import account_setup
 
 try:
     from accounts import AccountManager, AccountError
@@ -137,6 +138,7 @@ class Dashboard:
             raise ValueError("Dashboard key must be random and at least 24 characters")
         self.lock = threading.Lock()
         self.applying_labels = False
+        self.connecting_account = False
         feedback_file = directory / "feedback.json"
         self.feedback = (json.loads(feedback_file.read_text(encoding="utf-8"))
                          if feedback_file.exists() else {"revision": None, "items": {}})
@@ -187,6 +189,40 @@ class Dashboard:
                 pass
         return defaults
 
+    def account_setup(self, value):
+        email, permission = account_setup.selection(value)
+        with self.lock:
+            self.require_accounts_idle()
+            account_setup.require_new_account(self.accounts_mgr, email)
+            return account_setup.prepare(self.directory, email, permission)
+
+    def require_accounts_idle(self):
+        if self.state["phase"] == "running" or self.applying_labels or self.connecting_account:
+            raise AccountError("Bitte warten, bis der laufende Vorgang beendet ist.", 409)
+
+    def change_account(self, action, *args):
+        with self.lock:
+            self.require_accounts_idle()
+            return getattr(self.accounts_mgr, action)(*args)
+
+    def connect_account(self, value):
+        email, permission = account_setup.selection(value)
+        with self.lock:
+            self.require_accounts_idle()
+            if self.settings.get("live_mode"):
+                raise AccountError("Bitte schalte den Live-Modus in der Übersicht aus, bevor du ein Postfach verbindest.", 409)
+            account_setup.require_new_account(self.accounts_mgr, email)
+            config = account_setup.read_config(self.directory) or {}
+            self.connecting_account = True
+        try:
+            token = account_setup.verify_grant(value.get("token"), email, permission, config.get("client_id"))
+            with self.lock:
+                accounts = account_setup.store_new_account(self.accounts_mgr, email, token)
+            return {"status": "connected", "email": email, "permission": permission, "accounts": accounts}
+        finally:
+            with self.lock:
+                self.connecting_account = False
+
     def get_settings(self):
         with self.lock:
             s = dict(self.settings)
@@ -197,6 +233,8 @@ class Dashboard:
         if not isinstance(updates, dict):
             raise FeedbackError("Ungültige Einstellungen.")
         with self.lock:
+            if updates.get("live_mode") and self.connecting_account:
+                raise FeedbackError("Bitte warte, bis die Verbindung des Postfachs abgeschlossen ist, bevor du den Live-Modus einschaltest.", 409)
             if "live_mode" in updates:
                 self.settings["live_mode"] = bool(updates["live_mode"])
             if "sort_inbox" in updates:
@@ -324,7 +362,7 @@ class Dashboard:
 
     def apply_current_labels(self):
         with self.lock:
-            if self.state["phase"] == "running" or self.applying_labels:
+            if self.state["phase"] == "running" or self.applying_labels or self.connecting_account:
                 raise FeedbackError("Bitte warten, bis der aktuelle Lauf beendet ist.", 409)
             target_path = self.report_path
             if not target_path or not target_path.is_file():
@@ -571,7 +609,7 @@ class Dashboard:
         if mode == "all":
             limit = None
         with self.lock:
-            if self.state["phase"] == "running" or self.applying_labels:
+            if self.state["phase"] == "running" or self.applying_labels or self.connecting_account:
                 return False
             targets = self.accounts_mgr.get_active_targets()
             if not targets:
@@ -807,7 +845,11 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/gpu-status":
             self.json(200, self.app.gpu_status())
         elif path == "/api/accounts":
-            self.json(200, self.app.accounts_mgr.get_state())
+            with self.app.lock:
+                accounts = self.app.accounts_mgr.get_state()
+            self.json(200, accounts)
+        elif path == "/api/accounts/setup":
+            self.json(200, account_setup.setup_info(self.app.directory))
         elif path == "/api/settings":
             self.json(200, self.app.get_settings())
         elif path == "/api/report":
@@ -821,8 +863,10 @@ class Handler(BaseHTTPRequestHandler):
                 split = None
             filename = f"laya-mail-{split}.jsonl" if split else "laya-mail-training.jsonl"
             self.respond(200, self.app.training_export(split=split), "application/x-ndjson; charset=utf-8", download=filename)
-        elif path in {"/", "/app.js", "/style.css"}:
-            filename, kind = {"/": ("index.html", "text/html"), "/app.js": ("app.js", "text/javascript"), "/style.css": ("style.css", "text/css")}[path]
+        elif path in {"/", "/app.js", "/style.css", "/accounts/new", "/onboarding.js", "/onboarding.css"}:
+            filename, kind = {"/": ("index.html", "text/html"), "/app.js": ("app.js", "text/javascript"),
+                              "/style.css": ("style.css", "text/css"), "/accounts/new": ("onboarding.html", "text/html"),
+                              "/onboarding.js": ("onboarding.js", "text/javascript"), "/onboarding.css": ("onboarding.css", "text/css")}[path]
             self.respond(200, (Path(__file__).parent / "web" / filename).read_bytes(), kind + "; charset=utf-8")
         else:
             self.json(404, {"error": "Nicht gefunden."})
@@ -836,11 +880,12 @@ class Handler(BaseHTTPRequestHandler):
             length = int(self.headers.get("Content-Length", "0"))
         except ValueError:
             length = -1
-        if not 0 <= length <= 4096:
+        path = urlsplit(self.path).path
+        maximum = account_setup.MAX_UPLOAD if path == "/api/accounts/connect" else 4096
+        if not 0 <= length <= maximum:
             self.json(400, {"error": "Ungültige Anfrage."})
             return
         data = self.rfile.read(length)
-        path = urlsplit(self.path).path
         if path == "/login":
             code = parse_qs(data.decode("utf-8", errors="replace")).get("code", [""])[0]
             if hmac.compare_digest(code.encode(), self.app.key.encode()):
@@ -871,10 +916,23 @@ class Handler(BaseHTTPRequestHandler):
                 self.json(400, {"error": "Die Einstellungen sind kein gültiges JSON."})
             except FeedbackError as error:
                 self.json(error.status, {"error": str(error)})
+        elif path in {"/api/accounts/setup", "/api/accounts/connect"}:
+            try:
+                value = json.loads(data or b"{}")
+                result = self.app.account_setup(value) if path.endswith("/setup") else self.app.connect_account(value)
+                self.json(200, result)
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                self.json(400, {"error": "Bitte eine gültige JSON-Anmeldedatei auswählen."})
+            except AccountError as error:
+                self.json(error.status, {"error": str(error)})
+            except OSError:
+                self.json(503, {"error": "Das Konto konnte nicht gespeichert werden. Bitte erneut versuchen."})
         elif path == "/api/accounts/select":
             try:
                 value = json.loads(data or b"{}")
-                self.json(200, self.app.accounts_mgr.select(value.get("selected", "all")))
+                if not isinstance(value, dict):
+                    raise AccountError("Ungültige Kontoauswahl.")
+                self.json(200, self.app.change_account("select", value.get("selected", "all")))
             except (UnicodeDecodeError, json.JSONDecodeError):
                 self.json(400, {"error": "Ungültiges JSON."})
             except AccountError as error:
@@ -882,7 +940,9 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/accounts/add":
             try:
                 value = json.loads(data or b"{}")
-                self.json(200, self.app.accounts_mgr.add_account(value.get("email")))
+                if not isinstance(value, dict):
+                    raise AccountError("Ungültige Kontodaten.")
+                self.json(200, self.app.change_account("add_account", value.get("email")))
             except (UnicodeDecodeError, json.JSONDecodeError):
                 self.json(400, {"error": "Ungültiges JSON."})
             except AccountError as error:
@@ -890,7 +950,9 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/accounts/toggle":
             try:
                 value = json.loads(data or b"{}")
-                self.json(200, self.app.accounts_mgr.toggle_account(value.get("id"), value.get("enabled")))
+                if not isinstance(value, dict):
+                    raise AccountError("Ungültige Kontodaten.")
+                self.json(200, self.app.change_account("toggle_account", value.get("id"), value.get("enabled")))
             except (UnicodeDecodeError, json.JSONDecodeError):
                 self.json(400, {"error": "Ungültiges JSON."})
             except AccountError as error:
@@ -898,7 +960,9 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/accounts/remove":
             try:
                 value = json.loads(data or b"{}")
-                self.json(200, self.app.accounts_mgr.remove_account(value.get("id")))
+                if not isinstance(value, dict):
+                    raise AccountError("Ungültige Kontodaten.")
+                self.json(200, self.app.change_account("remove_account", value.get("id")))
             except (UnicodeDecodeError, json.JSONDecodeError):
                 self.json(400, {"error": "Ungültiges JSON."})
             except AccountError as error:
