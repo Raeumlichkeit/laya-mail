@@ -21,7 +21,8 @@ def managed_label_ids(label_cache):
     """Require a complete, unambiguous cache before reconciling any labels."""
     if not isinstance(label_cache, dict):
         raise LabelerError("Ungueltiger Label-Cache.")
-    missing = [key for key in LABEL_MAP if not isinstance(label_cache.get(key), str) or not label_cache[key].strip()]
+    missing = [key for key in LABEL_MAP if not isinstance(label_cache.get(key), str)
+               or not label_cache[key] or label_cache[key] != label_cache[key].strip()]
     if missing:
         raise LabelerError("Label-IDs fehlen fuer: " + ", ".join(LABEL_MAP[key] for key in missing))
     managed = {key: label_cache[key] for key in LABEL_MAP}
@@ -38,7 +39,7 @@ def get_or_create_labels(session):
         res = session.get(f"{GMAIL}/labels", timeout=15, allow_redirects=False)
         if res.status_code != 200:
             raise LabelerError(f"labels_list_failed_status_{res.status_code}")
-        existing = {lbl.get("name", "").strip(): lbl.get("id") for lbl in res.json().get("labels", [])}
+        existing = {lbl.get("name", ""): lbl.get("id") for lbl in res.json().get("labels", [])}
     except LabelerError:
         raise
     except Exception:

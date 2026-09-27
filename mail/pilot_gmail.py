@@ -297,9 +297,8 @@ def run_pilot(gmail_session, laya_session, expected_account, laya_url, key, prog
             except ImportError:
                 from mail.labeler import get_or_create_labels, apply_labels
             label_cache = get_or_create_labels(gmail_session)
-        except Exception as err:
-            logging.warning("Label-Initialisierung uebersprungen: %s", err)
-            label_cache = {}
+        except Exception:
+            raise PilotError("label_initialization_failed") from None
     if exclude_ids is None:
         listing = gmail_get(gmail_session, "/messages", labelIds="INBOX", maxResults=limit, includeSpamTrash="false")
         entries = listing.get("messages", [])
@@ -318,6 +317,7 @@ def run_pilot(gmail_session, laya_session, expected_account, laya_url, key, prog
             if not valid_message_id(message_id):
                 raise PilotError("gmail_message_id_invalid")
             row["message_id"] = message_id
+            row["account_email"] = expected_account.casefold()
             message = gmail_get(gmail_session, "/messages/" + message_id, format="full")
             headers = {h["name"].lower(): h["value"] for h in message["payload"].get("headers", [])}
             subject = clean(str(make_header(decode_header(headers.get("subject", "")))))
@@ -350,9 +350,8 @@ def run_pilot(gmail_session, laya_session, expected_account, laya_url, key, prog
                 try:
                     applied = apply_labels(gmail_session, message_id, suggestions, label_cache, archive=False)
                     row["applied_labels"] = applied
-                except Exception as err:
-                    logging.warning("Postfach-Sortierung fuer Nachricht %s fehlgeschlagen: %s", message_id, err)
-                    row["label_error"] = str(err)
+                except Exception:
+                    row["label_error"] = "Die Gmail-Labels konnten nicht aktualisiert werden."
         except PilotError as error:
             row["error"] = str(error)
         except requests.RequestException:
@@ -366,7 +365,8 @@ def run_pilot(gmail_session, laya_session, expected_account, laya_url, key, prog
         "created_utc": datetime.now(timezone.utc).isoformat(),
         "input_version": INPUT_VERSION,
         "batch_mode": "latest" if exclude_ids is None else "next",
-        "status": "error" if any(row["status"] == "error" for row in rows) else "complete",
+        "status": "error" if any(row["status"] == "error" or row.get("label_error") for row in rows) else "complete",
+        "account_email": expected_account.casefold(),
         "read_only": not apply_labels_mode, "applied_labels": bool(apply_labels_mode), "limit": limit, "messages": rows, "category_definitions": QUESTIONS,
         "limitations": ["Vorschlaege zur manuellen Pruefung; kein Qualitaetsnachweis.",
                         "Rohscores sind keine gemessenen Zuverlaessigkeitsquoten.",
@@ -443,7 +443,7 @@ def main(argv=None):
             report = run_pilot(gmail_session, laya_session, args.expected_account.strip(), args.laya_url, key, progress, exclude_ids, args.limit, apply_labels_mode=args.apply_labels)
         save_report(args.output, report)
         count = sum(row["status"] == "suggestion" for row in report["messages"])
-        errors = len(report["messages"]) - count
+        errors = sum(row["status"] == "error" or bool(row.get("label_error")) for row in report["messages"])
         mode_text = "Postfach mit Labels aktualisiert." if args.apply_labels else "Postfach unveraendert."
         print(f"Privater Bericht gespeichert: {count} Vorschlaege, {errors} Fehler. {mode_text}")
         return 1 if errors else 0

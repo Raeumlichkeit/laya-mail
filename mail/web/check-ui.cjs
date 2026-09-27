@@ -6,27 +6,45 @@ const vm = require('node:vm');
 
 class Node {
   constructor(tag = 'div') {
-    Object.assign(this, { tag, children: [], dataset: {}, attributes: {}, handlers: {}, value: '', textContent: '' });
+    Object.assign(this, { tag, tagName: tag.toUpperCase(), children: [], dataset: {}, attributes: {}, handlers: {}, value: '', textContent: '', parentElement: null, className: '' });
   }
   set innerHTML(_) { throw new Error('Unsafe HTML insertion'); }
-  append(...nodes) { this.children.push(...nodes); }
-  replaceChildren(...nodes) { this.children = nodes; }
+  append(...nodes) { for (const node of nodes) { node.parentElement = this; this.children.push(node); } }
+  replaceChildren(...nodes) { this.children.forEach((node) => { node.parentElement = null; }); this.children = []; this.append(...nodes); }
   setAttribute(key, value) { this.attributes[key] = value; }
   addEventListener(key, handler) { this.handlers[key] = handler; }
-  focus() {}
+  focus() { context.document.activeElement = this; }
   scrollIntoView() {}
   reportValidity() { this.validityReported = true; return false; }
+  matches(selector) { return selector.startsWith('.') ? this.className.split(/\s+/).includes(selector.slice(1)) : this.tag === selector; }
+  closest(selectors) {
+    for (let node = this; node; node = node.parentElement) {
+      if (selectors.split(',').some((selector) => node.matches(selector.trim()))) return node;
+    }
+    return null;
+  }
+  querySelector(selector) { return query([this], selector)[0] || null; }
+  get classList() {
+    return { toggle: (name, enabled) => { const names = this.className.split(/\s+/).filter((value) => value && value !== name); if (enabled) names.push(name); this.className = names.join(' '); } };
+  }
+}
+function walk(node) { return [node, ...node.children.flatMap(walk)]; }
+function query(roots, selector) {
+  const parts = selector.split(' ');
+  return roots.flatMap(walk).filter((node) => node.matches(parts.at(-1)) && (parts.length === 1 || node.parentElement?.closest(parts[0])));
 }
 const nodes = new Map();
 const get = (id) => {
-  if (!nodes.has(id)) nodes.set(id, new Node());
+  const existing = [...nodes.values()].flatMap(walk).find((node) => node.id === id);
+  if (existing) return existing;
+  if (id.startsWith('card-')) return null;
+  if (!nodes.has(id)) { const node = new Node(); node.id = id; nodes.set(id, node); }
   return nodes.get(id);
 };
 get('mail-limit').value = '20';
 const filters = ['all', 'unreviewed', 'uncertain', 'review', 'rechnung', 'werbung', 'wichtig', 'spam'].map((value) => {
   const node = new Node('button'); node.dataset.filter = value; return node;
 });
-const walk = (node) => [node, ...node.children.flatMap(walk)];
 const hostile = '<img src=x onerror=alert(1)>';
 const base = { report_id: 'synthetic-report', limit: 20, created_utc: '2026-09-26T10:00:00Z', messages: [
   { message_id: 'a', snapshot_id: 'snapshot-a', subject: hostile, sender: 'test@example.invalid', status: 'suggestion', training_ready: true, model_input: { state: hostile }, suggestions: { inhalt: 'rechnung', wichtig: 'ja', spamverdacht: 'nein' }, needs_review: true },
@@ -39,9 +57,21 @@ let reportReads = 0;
 let failSave = false;
 let lastPayload;
 let runPayloads = [];
-let serverStatus = { phase: 'complete', finished_at: base.created_utc, batch_mode: 'latest' };
+let serverStatus = {
+  phase: 'complete', finished_at: base.created_utc, batch_mode: 'latest',
+  accounts: { selected: 'all', accounts: [{ id: 'first', email: 'first@example.invalid', token_exists: true }, { id: 'second', email: 'second@example.invalid', token_exists: false }] },
+  settings: { live_mode: false, sort_inbox: false },
+};
+let controlPayload;
 const context = {
-  document: { getElementById: get, createElement: (tag) => new Node(tag), querySelectorAll: () => filters, querySelector: () => new Node('select') },
+  document: {
+    getElementById: get, createElement: (tag) => new Node(tag),
+    createTextNode: (text) => { const node = new Node('#text'); node.textContent = text; return node; },
+    querySelectorAll: (selector) => selector === '[data-filter]' ? filters : query([...nodes.values()], selector),
+    querySelector: (selector) => query([...nodes.values()], selector)[0] || null,
+    activeElement: new Node('body'), handlers: {},
+    addEventListener(type, handler) { this.handlers[type] = handler; },
+  },
   Intl, Date, JSON, Math, Number, String, Boolean, Object, Error,
   setTimeout: () => 1, clearTimeout: () => {}, location: { reload: () => { throw new Error('Unexpected reload'); } },
   fetch: async (url, options) => {
@@ -55,7 +85,7 @@ const context = {
       lastPayload = JSON.parse(options.body);
       assert.equal(options.credentials, 'same-origin');
       if (failSave) return { status: 500, ok: false, json: async () => ({ error: 'Synthetischer Speicherfehler' }) };
-      const row = serverReport.messages.find((mail) => mail.message_id === lastPayload.message_id);
+      const row = serverReport.messages.find((mail) => mail.message_id === lastPayload.message_id && (mail.account_email || '') === (lastPayload.account_email || ''));
       row.review = { action: lastPayload.action, labels: lastPayload.action === 'corrected' ? lastPayload.labels : lastPayload.action === 'accepted' ? row.suggestions : null, training_eligible: lastPayload.action !== 'skipped' };
       revision++;
       data = structuredClone(serverReport);
@@ -67,12 +97,28 @@ const context = {
       runPayloads.push(payload);
       serverStatus = { phase: 'running', finished_at: null, processed: 0, total: payload.limit, requested_limit: payload.limit, batch_mode: payload.mode };
       data = { status: 'started' };
+    } else if (url === '/api/accounts/select') {
+      controlPayload = JSON.parse(options.body);
+      serverStatus.accounts.selected = controlPayload.selected;
+      data = serverStatus.accounts;
+    } else if (url === '/api/settings') {
+      controlPayload = JSON.parse(options.body);
+      Object.assign(serverStatus.settings, controlPayload);
+      data = serverStatus.settings;
     } else throw new Error('Unexpected route ' + url);
     return { status: 200, ok: true, json: async () => data };
   },
 };
 vm.createContext(context);
 vm.runInContext(fs.readFileSync(path.join(__dirname, 'app.js'), 'utf8'), context);
+
+async function press(key, target = new Node('body'), options = {}) {
+  context.document.activeElement = target;
+  const event = { key, defaultPrevented: false, preventDefault() { this.defaultPrevented = true; }, ...options };
+  context.document.handlers.keydown(event);
+  await new Promise(setImmediate);
+  return event;
+}
 
 (async () => {
   await new Promise(setImmediate);
@@ -95,6 +141,20 @@ vm.runInContext(fs.readFileSync(path.join(__dirname, 'app.js'), 'utf8'), context
   serverStatus.processing_note = null;
   await context.refreshStatus();
   assert.equal(get('processing-note').hidden, true, 'A cleared fallback note disappears');
+  assert.equal(get('account-select').children.length, 3);
+  assert.equal(get('account-select').children[2].textContent, 'second@example.invalid ⚠️');
+  get('account-select').value = 'second';
+  await get('account-select').handlers.change({ target: get('account-select') });
+  assert.deepEqual(controlPayload, { selected: 'second' });
+  assert.equal(get('account-select').value, 'second');
+  get('toggle-live-mode').checked = true;
+  await get('toggle-live-mode').handlers.change({ target: get('toggle-live-mode') });
+  assert.deepEqual(controlPayload, { live_mode: true });
+  assert.equal(get('live-activity').hidden, false);
+  get('toggle-sort-inbox').checked = true;
+  await get('toggle-sort-inbox').handlers.change({ target: get('toggle-sort-inbox') });
+  assert.deepEqual(controlPayload, { sort_inbox: true });
+  assert.equal(get('mode-badge-text').textContent, 'Gmail sortieren (Labels aktiv)');
   assert.ok(walk(get('messages')).some((node) => node.textContent === hostile));
   const legacy = get('messages').children[1];
   assert.equal(walk(legacy).find((node) => node.textContent === 'Stimmt').disabled, true);
@@ -188,5 +248,77 @@ vm.runInContext(fs.readFileSync(path.join(__dirname, 'app.js'), 'utf8'), context
   assert.equal(get('run-next').disabled, false);
   assert.equal(get('mail-limit').disabled, false);
   assert.equal(get('message-limit-note').textContent, 'bis zu 12 je Durchlauf');
-  console.log('PASS: safe text; GPU/CPU status and fallback; reviews; draft recovery; next/latest limits; invalid-count guards; input locks; count preservation; next-batch empty state');
+
+  serverReport = structuredClone(base);
+  context.renderReport(serverReport);
+  get('search').value = '';
+  context.selectFilter('all');
+  vm.runInContext('selectedMailKey = null; renderMessages();', context);
+  const originalCards = [...get('messages').children];
+  const otherDetails = originalCards[1].querySelector('.model-details');
+  otherDetails.open = true;
+  originalCards[1].handlers.click();
+  assert.equal(get('messages').children[1], originalCards[1], 'Card selection must not replace native controls');
+  assert.equal(otherDetails.open, true, 'Card selection must preserve open details');
+  vm.runInContext('selectedMailKey = null; renderMessages();', context);
+
+  for (const tag of ['button', 'a', 'summary']) {
+    const nativeControl = new Node(tag);
+    const nested = new Node('span'); nativeControl.append(nested);
+    for (const target of [nativeControl, nested]) {
+      for (const key of ['Enter', ' ']) {
+        const before = lastPayload;
+        const event = await press(key, target);
+        assert.equal(event.defaultPrevented, false, `${key} on ${tag} must retain its native action`);
+        assert.equal(lastPayload, before, `${key} on ${tag} must not review mail`);
+      }
+    }
+  }
+  for (const tag of ['input', 'select', 'textarea']) {
+    const before = lastPayload;
+    assert.equal((await press('1', new Node(tag))).defaultPrevented, false);
+    assert.equal(lastPayload, before, 'Typing in a form field must not review mail');
+  }
+  const editable = new Node('div'); editable.isContentEditable = true;
+  for (const [target, options] of [[editable, {}], [new Node('body'), { ctrlKey: true }], [new Node('body'), { metaKey: true }], [new Node('body'), { defaultPrevented: true }]]) {
+    const before = lastPayload;
+    await press('s', target, options);
+    assert.equal(lastPayload, before, 'Native editing/browser shortcuts must not skip mail');
+  }
+  assert.equal((await press('j')).defaultPrevented, true);
+  assert.equal(vm.runInContext('selectedMailKey', context), context.mailKey(base.messages[1]));
+  await press('K');
+  assert.equal(vm.runInContext('selectedMailKey', context), context.mailKey(base.messages[0]));
+  await press('ArrowDown'); await press('ArrowUp');
+  assert.equal(vm.runInContext('selectedMailKey', context), context.mailKey(base.messages[0]));
+  const inputDetails = get('messages').children[0].querySelector('.input-details');
+  await press(' ');
+  assert.equal(inputDetails.open, true);
+  await press('1'); assert.equal(lastPayload.action, 'accepted');
+  await press('2'); assert.equal(vm.runInContext('editing.message_id', context), 'a');
+  await press('Escape'); assert.equal(vm.runInContext('editing', context), null);
+  await press('c'); assert.equal(vm.runInContext('editing.message_id', context), 'a');
+  await press('Escape');
+  await press('3'); assert.equal(lastPayload.action, 'skipped');
+  await press('Enter'); assert.equal(lastPayload.action, 'accepted');
+
+  const first = { ...structuredClone(base.messages[0]), account_email: 'first@example.invalid' };
+  const second = { ...structuredClone(base.messages[0]), account_email: 'second@example.invalid' };
+  serverReport = { ...structuredClone(base), messages: [first, second] };
+  context.renderReport(serverReport);
+  const cards = get('messages').children;
+  assert.notEqual(cards[0].id, cards[1].id, 'Same message IDs in different accounts need unique DOM IDs');
+  cards[1].handlers.click();
+  await press('2');
+  assert.equal(vm.runInContext('editing.account_email', context), 'second@example.invalid');
+  assert.equal(query([get('messages')], '.correction-form').length, 1, 'Only the selected account opens a correction form');
+  await context.saveFeedback(second, 'corrected');
+  assert.equal(lastPayload.account_email, 'second@example.invalid');
+  assert.equal(first.review, undefined);
+  assert.equal(second.review.action, 'corrected');
+  await press('1'); assert.equal(lastPayload.account_email, 'second@example.invalid');
+  await press('3'); assert.equal(lastPayload.account_email, 'second@example.invalid');
+  await get('run-rescan').handlers.click();
+  assert.deepEqual(runPayloads.at(-1), { mode: 'rescan', limit: 12 });
+  console.log('PASS: dashboard state; account/live controls; native keyboard actions; navigation/review shortcuts; account-specific feedback; counts and drafts');
 })().catch((error) => { console.error(error); process.exitCode = 1; });

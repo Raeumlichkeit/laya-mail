@@ -4,21 +4,23 @@ Lokale Weboberfläche zum Sortieren von Gmail-Nachrichten mit [Laya](https://git
 
 ## Funktionen
 
-- Pro Durchlauf 1–100 Mails aus dem Posteingang laden; neue Stapel überspringen bereits angezeigte Nachrichten.
+- Pro Durchlauf insgesamt 1–100 Mails aus den ausgewählten Posteingängen laden; neue Stapel überspringen bereits angezeigte Nachrichten getrennt je Konto.
 - Inhalt: **Rechnung**, **Allgemeine Information**, **Werbung**, **Sonstiges**.
 - **Wichtig** und **Spamverdacht** werden unabhängig davon bewertet.
 - **⚡ Live GPU-Statusanzeige**: Header-Badge zeigt in Echtzeit den Verbindungsstatus und die Latenz der NVIDIA-Grafikkarte (z. B. `RTX 4070 Ti verbunden · 3 ms`), mit automatischem Fallback auf CPU.
 - **✉️ Multi-Account-Modell**: Beliebig viele E-Mail-Adressen über `accounts.json` verwalten; Abfrage einzelner Postfächer oder aller Konten kombiniert direkt im Dashboard.
 - **🏷️ Postfach-Sortier-Toggle**: Optionales automatisches Zuweisen von Labels (`Rechnung`, `Werbung`, `Info`, `Wichtig`, `Spamverdacht`) im Gmail-Postfach – absolut nicht-destruktiv (Mails bleiben im Posteingang, kein Löschen/Archivieren).
-- **🔄 Live-Modus (Autopilot)**: Hintergrund-Daemon, der alle aktiven Postfächer alle 3 Minuten automatisch auf neue Mails prüft, via GPU bewertet und sortiert.
+- **🔄 Live-Modus (Autopilot)**: Prüft die ausgewählten aktiven Postfächer alle 3 Minuten in Stapeln von bis zu 10 Mails. Er nutzt denselben Ablauf, die GPU-Auswahl mit CPU-Fallback und die Ergebnisübersicht wie manuelle Durchläufe. Gmail-Labels werden nur bei eingeschalteter Postfach-Sortierung geändert; während eines laufenden Stapels wartet der nächste Live-Durchlauf.
 - **Speed-Annotation & Tastaturkürzel**: Schnelles Bewerten mit `1` (Stimmt), `2` (Korrigieren), `3` (Überspringen) und `J`/`K` zur Navigation.
 - **Active Learning**: Eigener Filter für „Wackelkandidaten“ (knappe Modellentscheidungen) zum gezielten Anlernen an Grenzfällen.
 - **Signalwort-Hervorhebung**: Automatische Markierung von Signalbegriffen (Rechnungsbegriffe, Dringlichkeit, Phishing/Spam) im Mailtext.
-- **Datensatz-Verteilung & Split-Export**: Visuelle Klassen-Balance im Dashboard und deterministischer Export für Training (80%) und Validierung (20%).
+- **Datensatz-Verteilung & Split-Export**: Visuelle Klassen-Balance im Dashboard und deterministischer Export mit ungefähr 80% Training und 20% Validierung. Identische Eingabetexte werden immer derselben Gruppe zugeordnet, auch über Konten hinweg. Bestehende Exporte bleiben unverändert; für einen neuen Split beide Dateien gemeinsam neu exportieren.
 - **Lokale Fine-Tuning-Pipeline**: 1-Klick-Skripte für GPU-Training (`gpu/train_laya.py`) und Modell-Evaluation (`gpu/evaluate_model.py`) auf dem Windows-PC.
 - GPU vor jedem Stapel automatisch auswählen; bei nicht verfügbarem GPU-Dienst CPU verwenden.
 
 Im Standardmodus liest Laya Mail mit `gmail.readonly`. Bei aktiviertem Sortier-Toggle werden ausschließlich Klassifizierungs-Labels vergeben (`gmail.modify`). Das Programm versendet und löscht unter keinen Umständen E-Mails; alle Nachrichten verbleiben sicher im Posteingang. Anhänge und verlinkte Seiten werden nicht gelesen. Modell-Scores sind keine gemessenen Zuverlässigkeitsquoten.
+
+Beim Aktualisieren werden die fünf verwalteten Gmail-Labels abgeglichen: Überholte Zuordnungen werden entfernt, andere Labels bleiben erhalten. Vor Schreibzugriffen wird geprüft, ob die Google-Anmeldung zum jeweiligen Postfach gehört. Bewertungen und Ladehistorie bleiben je Konto getrennt, auch wenn Nachrichten dieselbe ID haben.
 
 ## Aufbau
 
@@ -57,6 +59,8 @@ Die Google-Freigabe auf dem Rechner durchführen, auf dem auch der Browser geöf
 ```
 
 Die im Terminal angezeigte Google-Adresse persönlich im Browser öffnen und die Leseberechtigung freigeben. Der Helfer überschreibt keine bestehende Tokendatei. Bei getrennten Rechnern `token.json` anschließend über eine geschützte Verbindung auf den Dashboard-Rechner übertragen. Für eine bereits eingerichtete Installation können die vorhandenen privaten Dateien weiterverwendet werden; keine neue Google-Freigabe allein wegen dieses Repositorys erforderlich.
+
+Für Gmail-Labels benötigt jedes betroffene Konto eine Freigabe mit `--modify`. Eine vorhandene reine Lesefreigabe reicht dafür nicht. Weitere Konten zuerst im Dashboard hinzufügen; den dort angegebenen Token-Dateinamen für die jeweilige Autorisierung verwenden.
 
 Starten, dabei Adresse und Modell-URL anpassen:
 

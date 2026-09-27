@@ -1,5 +1,6 @@
 """Unit tests for AccountManager."""
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -71,6 +72,41 @@ class AccountManagerTests(unittest.TestCase):
         self.assertEqual(mgr.get_token_path("first@example.com"), self.dir / "token.json")
         self.assertEqual(mgr.get_token_path("second@example.com"), self.dir / "token_custom.json")
         self.assertIsNone(mgr.get_token_path("unknown@example.com"))
+
+    def test_same_local_part_gets_distinct_stable_token_paths(self):
+        mgr = AccountManager(self.dir)
+        emails = ("same@first.invalid", "same@second.invalid")
+        for email in emails:
+            mgr.add_account(email)
+        paths = [mgr.get_token_path(email) for email in emails]
+        self.assertNotEqual(*paths)
+        for path in paths:
+            self.assertEqual(path.parent, self.dir)
+            path.write_text('{"token": "synthetic"}', encoding="utf-8")
+        mgr.add_account(" SAME@FIRST.INVALID ")
+        reloaded = AccountManager(self.dir)
+        self.assertEqual([reloaded.get_token_path(email) for email in emails], paths)
+        self.assertEqual({target["email"]: target["token_path"] for target in reloaded.get_active_targets()},
+                         dict(zip(emails, map(str, paths))))
+
+    def test_rejects_token_paths_and_duplicate_token_without_changing_config(self):
+        mgr = AccountManager(self.dir, "first@example.invalid")
+        original = mgr.get_state()
+        saved = mgr.config_path.read_bytes()
+        for token in ("../token_other.json", "..\\token_other.json", "sub/token_other.json",
+                      "sub\\token_other.json", str(self.dir / "token_other.json"), "token.json", 42):
+            with self.subTest(token=token), self.assertRaises(AccountError):
+                mgr.add_account("second@example.invalid", token)
+            self.assertEqual(mgr.get_state(), original)
+            self.assertEqual(mgr.config_path.read_bytes(), saved)
+
+    @unittest.skipUnless(os.name == "nt", "Windows token paths are case insensitive")
+    def test_rejects_case_alias_of_another_accounts_token_on_windows(self):
+        mgr = AccountManager(self.dir)
+        mgr.add_account("first@example.invalid", "token_shared.json")
+        (self.dir / "token_shared.json").write_text("synthetic", encoding="utf-8")
+        with self.assertRaises(AccountError):
+            mgr.add_account("second@example.invalid", "token_SHARED.json")
 
 
 if __name__ == "__main__":

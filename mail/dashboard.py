@@ -19,7 +19,7 @@ from urllib.parse import parse_qs, urlsplit
 
 import requests
 
-from pilot_gmail import save_report
+from pilot_gmail import save_report, gmail_get, INPUT_VERSION, QUESTIONS
 
 try:
     from accounts import AccountManager, AccountError
@@ -84,6 +84,8 @@ def for_review(report):
         reasons = []
         if row.get("status") != "suggestion":
             reasons.append("Technischer Fehler bei der Auswertung")
+        if row.get("label_error"):
+            reasons.append("Gmail-Labels konnten nicht aktualisiert werden")
         if row.get("truncated"):
             reasons.append("Text oder Betreff wurde gekürzt")
         if row.get("content_omitted"):
@@ -147,15 +149,8 @@ class Dashboard:
         self.settings_file = self.directory / "settings.json"
         self.settings = self._load_settings()
 
-        # Live Autopilot Watcher
-        key_path = self.directory / "gpu-api-key"
-        self.watcher = LiveWatcher(
-            directory=self.directory,
-            accounts_mgr=self.accounts_mgr,
-            laya_url=self.laya_url,
-            key_path=key_path,
-            get_settings_fn=self.get_settings,
-        )
+        # Live and manual checks share account routing, history and one worker.
+        self.watcher = LiveWatcher(lambda: self.start("next", 10, live=True), self.get_settings)
         self.watcher.start()
 
     def _load_settings(self):
@@ -241,6 +236,30 @@ class Dashboard:
             return {"created_utc": None, "messages": [], "limitations": []}
         return json.loads(self.report_path.read_text(encoding="utf-8"))
 
+    def review_key(self, row):
+        account = row.get("account_email", self.account).casefold()
+        message_id = row["message_id"]
+        # Keep existing primary-account reviews addressable without rewriting data.
+        return message_id if account == self.account.casefold() else account + ":" + message_id
+
+    def seen_path(self, account):
+        suffix = hashlib.sha256(account.casefold().encode()).hexdigest()[:16]
+        return self.directory / ("seen-message-ids-" + suffix + ".json")
+
+    def seen_ids(self, account):
+        seen = set()
+        for key, item in self.feedback["items"].items():
+            owner = item.get("account_email") or (key.rsplit(":", 1)[0] if ":" in key else self.account)
+            if owner.casefold() == account.casefold():
+                seen.add(item.get("message_id") or key.rsplit(":", 1)[-1])
+        for path in self.directory.glob("pilot-*.json"):
+            previous = json.loads(path.read_text(encoding="utf-8"))
+            for row in previous["messages"]:
+                owner = row.get("account_email") or previous.get("account_email") or self.account
+                if row.get("message_id") and owner.casefold() == account.casefold():
+                    seen.add(row["message_id"])
+        return seen
+
     def review_report(self):
         # Caller holds the same lock used for report switches and feedback writes.
         report = for_review(self.report())
@@ -249,7 +268,7 @@ class Dashboard:
         for row in report["messages"]:
             fingerprint = snapshot_id(row, report.get("input_version"))
             row.update(snapshot_id=fingerprint, training_ready=fingerprint is not None, review=None)
-            item = self.feedback["items"].get(row.get("message_id"))
+            item = self.feedback["items"].get(self.review_key(row)) if row.get("message_id") else None
             if item and item.get("snapshot_id") == fingerprint:
                 row["review"] = {name: item[name] for name in ("action", "labels", "updated_utc")}
                 row["review"]["training_eligible"] = training_eligible(item)
@@ -310,18 +329,22 @@ class Dashboard:
                 raise FeedbackError("Google Auth nicht verfuegbar.", 500) from err
 
             grouped = {}
+            errors = []
+            known_accounts = self.accounts_mgr.list_accounts()
             for msg in messages:
-                email = msg.get("account_email") or self.account
+                email = msg.get("account_email") or report.get("account_email")
+                if not email and len(known_accounts) == 1 and known_accounts[0]["email"].casefold() == self.account.casefold():
+                    email = self.account  # Unambiguous reports from before multi-account support.
+                if not email:
+                    errors.append("Bei einer Nachricht fehlt die eindeutige Kontozuordnung. Bitte das Postfach erneut prüfen.")
+                    continue
                 grouped.setdefault(email, []).append(msg)
 
             applied_count = 0
-            errors = []
 
             for email, account_messages in grouped.items():
                 token_path = self.accounts_mgr.get_token_path(email)
                 if not token_path or not Path(token_path).is_file():
-                    token_path = str(self.directory / "token.json")
-                if not Path(token_path).is_file():
                     errors.append(f"Token fuer {email} nicht gefunden.")
                     continue
 
@@ -338,6 +361,10 @@ class Dashboard:
 
                     with AuthorizedSession(creds) as session:
                         session.trust_env = False
+                        profile = gmail_get(session, "/profile")
+                        if str(profile.get("emailAddress", "")).casefold() != email.casefold():
+                            errors.append(f"Die Google-Anmeldung gehört nicht zu {email}; keine Labels geändert.")
+                            continue
                         label_cache = get_or_create_labels(session)
                         for msg in account_messages:
                             msg_id = msg.get("message_id")
@@ -346,7 +373,7 @@ class Dashboard:
 
                             fingerprint = snapshot_id(msg, input_version)
                             effective = None
-                            item = self.feedback.get("items", {}).get(msg_id)
+                            item = self.feedback["items"].get(self.review_key({**msg, "account_email": email}))
                             if (item
                                     and item.get("action") in {"accepted", "corrected"}
                                     and fingerprint is not None
@@ -360,11 +387,11 @@ class Dashboard:
                                 continue
 
                             applied = apply_labels(session, msg_id, effective, label_cache, archive=False)
-                            if applied:
-                                msg["applied_labels"] = applied
-                                applied_count += 1
-                except Exception as err:
-                    errors.append(f"Fehler bei {email}: {err}")
+                            msg["applied_labels"] = applied
+                            msg.pop("label_error", None)
+                            applied_count += 1
+                except Exception:
+                    errors.append(f"Labels für {email} konnten nicht vollständig aktualisiert werden. Bitte Anmeldung und Verbindung prüfen.")
 
             with self.lock:
                 if self.report_path != target_path:
@@ -372,8 +399,8 @@ class Dashboard:
                 else:
                     try:
                         save_report(target_path, report)
-                    except Exception as err:
-                        errors.append(f"Bericht konnte nicht gespeichert werden: {err}")
+                    except Exception:
+                        errors.append("Bericht konnte nicht gespeichert werden.")
 
             return {
                 "status": "ok",
@@ -397,9 +424,14 @@ class Dashboard:
             message_id = data.get("message_id")
             if not isinstance(message_id, str):
                 raise FeedbackError("Die Nachricht fehlt.")
-            row = next((row for row in report["messages"] if row.get("message_id") == message_id), None)
-            if row is None:
+            account = data.get("account_email")
+            if account is not None and not isinstance(account, str):
+                raise FeedbackError("Ungültige Kontozuordnung.")
+            matches = [row for row in report["messages"] if row.get("message_id") == message_id
+                       and (account is None or row.get("account_email", self.account).casefold() == account.casefold())]
+            if len(matches) != 1:
                 raise FeedbackError("Diese Nachricht gehört nicht zum angezeigten Bericht.", 409)
+            row = matches[0]
             fingerprint = snapshot_id(row, report.get("input_version"))
             if "snapshot_id" not in data or data["snapshot_id"] != fingerprint:
                 raise FeedbackError("Die ausgewertete Texteingabe hat sich geändert. Bitte neu laden.", 409)
@@ -415,12 +447,13 @@ class Dashboard:
                     raise FeedbackError("Bitte Inhalt, Wichtigkeit und Spamverdacht vollständig auswählen.")
             timestamp = now()
             item = {"action": action, "labels": labels, "updated_utc": timestamp,
+                    "message_id": message_id, "account_email": row.get("account_email", self.account),
                     "snapshot_id": fingerprint, "model_input": row.get("model_input"),
                     "input_version": report.get("input_version"), "source_report_id": self.report_path.name,
                     "original_suggestions": row.get("suggestions"),
                     "truncated": row.get("truncated", False), "content_omitted": row.get("content_omitted", False),
                     "attachment_names": row.get("attachment_names", [])}
-            pending = {"revision": timestamp, "items": {**self.feedback["items"], message_id: item}}
+            pending = {"revision": timestamp, "items": {**self.feedback["items"], self.review_key(row): item}}
             save_report(self.directory / "feedback.json", pending)
             self.feedback = pending
             return self.review_report()
@@ -432,7 +465,7 @@ class Dashboard:
                 if not training_eligible(item):
                     continue
                 # Deterministic train/val assignment: 80% train, 20% val
-                h = int(hashlib.sha256(message_id.encode()).hexdigest()[:8], 16)
+                h = int(hashlib.sha256(item["model_input"]["state"].encode()).hexdigest()[:8], 16)
                 item_split = "val" if (h % 100) < 20 else "train"
                 if split and split in ("train", "val") and item_split != split:
                     continue
@@ -442,7 +475,8 @@ class Dashboard:
                     for name, question in payload["questions"].items()}
                 metadata = {name: item.get(name) for name in ("snapshot_id", "input_version", "source_report_id",
                             "updated_utc", "action", "original_suggestions", "truncated", "content_omitted", "attachment_names")}
-                metadata["message_id"] = message_id
+                metadata["message_id"] = item.get("message_id") or message_id.rsplit(":", 1)[-1]
+                metadata["account_email"] = item.get("account_email", self.account)
                 metadata["split"] = item_split
                 examples.append(json.dumps({**payload, "gold": gold, "metadata": metadata}, ensure_ascii=False))
             return ("\n".join(examples) + ("\n" if examples else "")).encode()
@@ -450,11 +484,12 @@ class Dashboard:
     def status(self):
         with self.lock:
             state = dict(self.state)
+            state["applying_labels"] = self.applying_labels
             state["feedback_revision"] = self.feedback["revision"]
             if state["phase"] == "running":
                 try:
                     progress = json.loads((self.directory / "progress.json").read_text())
-                    state.update(processed=int(progress["processed"]), total=int(progress["total"]))
+                    state.update(processed=state.get("progress_offset", 0) + int(progress["processed"]))
                 except (OSError, ValueError, KeyError, TypeError):
                     pass
         state.update(read_only=not self.settings.get("sort_inbox", False))
@@ -496,29 +531,31 @@ class Dashboard:
             pass
         return (*cpu[:3], "Hauptrechner nicht bereit; dieser Stapel läuft auf dem Mac mini.")
 
-    def start(self, mode="latest", limit=20):
+    def start(self, mode="latest", limit=20, live=False):
         if not isinstance(mode, str) or mode not in {"latest", "next", "rescan"}:
             raise FeedbackError("Bitte eine gültige Ladeaktion wählen.")
         if type(limit) is not int or not 1 <= limit <= 100:
             raise FeedbackError("Bitte eine ganze Anzahl zwischen 1 und 100 wählen.")
         with self.lock:
-            if self.state["phase"] == "running":
+            if self.state["phase"] == "running" or self.applying_labels:
                 return False
+            targets = self.accounts_mgr.get_active_targets()
+            if not targets:
+                raise FeedbackError("Kein ausgewähltes, aktives Postfach mit Anmeldung verfügbar.", 409)
             if mode == "next":
-                seen = set(self.feedback["items"])
-                # The saved reports are the history; no second database or cursor is needed.
                 try:
-                    for path in self.directory.glob("pilot-*.json"):
-                        previous = json.loads(path.read_text(encoding="utf-8"))
-                        seen.update(row["message_id"] for row in previous["messages"] if row.get("message_id"))
+                    for target in targets:
+                        save_report(self.seen_path(target["email"]), sorted(self.seen_ids(target["email"])))
                 except (ValueError, TypeError, KeyError) as error:
                     raise FeedbackError("Die bisherigen Berichte konnten nicht gelesen werden. Der nächste Stapel wurde nicht gestartet.", 503) from error
-                save_report(self.directory / "seen-message-ids.json", sorted(seen))
             pending = dict(self.state, phase="running", processed=0, total=limit, started_at=now(),
-                           finished_at=None, error=None, batch_mode=mode, requested_limit=limit)
+                           finished_at=None, error=None, batch_mode=mode, requested_limit=limit, progress_offset=0)
             save_report(self.directory / "progress.json", {"processed": 0, "total": limit})
             save_report(self.directory / "status.json", pending)
             self.state = pending
+            self._run_targets = targets
+            self._run_sort = bool(self.settings.get("sort_inbox", False)) or mode == "rescan"
+            self._run_live = live
             try:
                 threading.Thread(target=self.run, args=(mode, limit), daemon=True).start()
             except RuntimeError as error:
@@ -530,20 +567,24 @@ class Dashboard:
     def run(self, mode="latest", limit=20):
         # No dashboard lock is held while probing the optional GPU host.
         laya_url, key_path, model, note = self.select_backend()
-        targets = self.accounts_mgr.get_active_targets()
-        if not targets:
-            targets = [{"email": self.account, "token_path": str(self.directory / "token.json")}]
-
-        sort_inbox = bool(self.settings.get("sort_inbox", False))
+        targets = getattr(self, "_run_targets", None) or self.accounts_mgr.get_active_targets()
+        sort_inbox = getattr(self, "_run_sort", bool(self.settings.get("sort_inbox", False)) or mode == "rescan")
         all_rows = []
-        error = None
+        errors = []
         report_path = self.directory / ("pilot-" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ") + ".json")
-        per_account_limit = max(1, limit // len(targets)) if len(targets) > 1 else limit
+        report = {"created_utc": now(), "input_version": INPUT_VERSION, "batch_mode": mode,
+                  "read_only": not sort_inbox, "applied_labels": sort_inbox, "limit": limit,
+                  "category_definitions": QUESTIONS, "processing_backend": model}
 
         for index, target in enumerate(targets):
+            remaining = limit - len(all_rows)
+            if remaining <= 0:
+                break
+            remaining_accounts = len(targets) - index
+            quota = max(1, (remaining + remaining_accounts - 1) // remaining_accounts)
             email = target["email"]
             token = target["token_path"]
-            account_report_path = report_path if len(targets) == 1 else (self.directory / f".pilot-tmp-{index}.json")
+            account_report_path = self.directory / f".{report_path.stem}-{index}.json"
             command = [
                 sys.executable, str(Path(__file__).with_name("pilot_gmail.py")),
                 "--token", str(token),
@@ -552,66 +593,52 @@ class Dashboard:
                 "--laya-url", laya_url,
                 "--output", str(account_report_path),
                 "--progress", str(self.directory / "progress.json"),
-                "--limit", str(per_account_limit),
+                "--limit", str(quota),
             ]
             if mode == "next":
-                command.extend(["--exclude-ids-file", str(self.directory / "seen-message-ids.json")])
-            if sort_inbox or mode == "rescan":
+                command.extend(["--exclude-ids-file", str(self.seen_path(email))])
+            if sort_inbox:
                 command.append("--apply-labels")
 
             try:
                 with self.lock:
-                    self.state.update(model=model, processing_note=note)
+                    self.state.update(model=model, processing_note=note, progress_offset=len(all_rows))
+                    save_report(self.directory / "progress.json", {"processed": 0, "total": quota})
                     save_report(self.directory / "status.json", self.state)
-                result = subprocess.run(command, capture_output=True, text=True, timeout=max(900, per_account_limit * 20))
+                result = subprocess.run(command, capture_output=True, text=True, timeout=max(900, quota * 20))
                 if result.returncode:
-                    error = "Der Lesetest konnte nicht vollständig abgeschlossen werden. Details stehen, soweit vorhanden, bei den Nachrichten."
-                if len(targets) > 1 and account_report_path.exists():
+                    errors.append("Ein Postfach konnte nicht vollständig ausgewertet oder sortiert werden.")
+                if account_report_path.exists():
                     rep = json.loads(account_report_path.read_text(encoding="utf-8"))
+                    report["limitations"] = rep.get("limitations", [])
                     for msg in rep.get("messages", []):
                         msg["account_email"] = email
                         all_rows.append(msg)
+                    if rep.get("status") == "error":
+                        errors.append("Ein Postfach meldet Fehler; bitte die Nachrichtenhinweise prüfen.")
                     account_report_path.unlink(missing_ok=True)
-            except (OSError, subprocess.TimeoutExpired):
-                error = "Der Lesetest wurde abgebrochen oder hat zu lange gedauert."
+                else:
+                    errors.append("Für ein Postfach wurde kein Auswertungsbericht erstellt.")
+            except (OSError, ValueError, KeyError, TypeError, subprocess.TimeoutExpired):
+                errors.append("Ein Postfachlauf wurde abgebrochen oder lieferte einen ungültigen Bericht.")
 
         with self.lock:
-            count = 0
-            if len(targets) == 1:
-                if report_path.exists():
-                    try:
-                        report = json.loads(report_path.read_text(encoding="utf-8"))
-                        count = len(report.get("messages", []))
-                        report["processing_backend"] = model
-                        save_report(report_path, report)
-                        self.report_path = report_path
-                    except (OSError, ValueError, KeyError, TypeError):
-                        error = "Der neue Auswertungsbericht konnte nicht gelesen werden."
-                else:
-                    error = error or "Es wurde kein Auswertungsbericht erstellt."
-            else:
-                combined_report = {
-                    "created_utc": now(),
-                    "input_version": "mail-v2",
-                    "batch_mode": mode,
-                    "status": "error" if any(r.get("status") == "error" for r in all_rows) else "complete",
-                    "read_only": not sort_inbox,
-                    "applied_labels": bool(sort_inbox),
-                    "limit": limit,
-                    "messages": all_rows,
-                    "processing_backend": model,
-                    "category_definitions": {
-                        "inhalt": {"type": "choice", "instructions": "Inhaltskategorie", "criteria": {}},
-                        "wichtig": {"type": "choice", "instructions": "Wichtigkeit", "criteria": {}},
-                        "spamverdacht": {"type": "choice", "instructions": "Spamverdacht", "criteria": {}},
-                    }
-                }
-                save_report(report_path, combined_report)
-                self.report_path = report_path
-                count = len(all_rows)
+            if not targets:
+                errors.append("Kein aktives Postfach verfügbar.")
+            if any(row.get("status") == "error" or row.get("label_error") for row in all_rows):
+                errors.append("Einzelne Nachrichten konnten nicht vollständig verarbeitet werden.")
+            error = " ".join(dict.fromkeys(errors)) or None
+            count = len(all_rows)
+            report.update(status="error" if error else "complete", messages=all_rows)
+            try:
+                if count or not getattr(self, "_run_live", False):
+                    save_report(report_path, report)
+                    self.report_path = report_path
+            except OSError:
+                error = "Der neue Auswertungsbericht konnte nicht gespeichert werden."
 
             self.state.update(phase="error" if error else "complete", processed=count,
-                              total=count, finished_at=now(), error=error)
+                              total=count, finished_at=now(), error=error, progress_offset=0)
             try:
                 save_report(self.directory / "status.json", self.state)
             except OSError:
@@ -802,8 +829,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.json(200, self.app.apply_current_labels())
             except FeedbackError as error:
                 self.json(error.status, {"error": str(error)})
-            except Exception as error:
-                self.json(500, {"error": f"Fehler beim Labeln: {error}"})
+            except Exception:
+                self.json(500, {"error": "Labels konnten nicht aktualisiert werden."})
         elif path == "/api/run":
             try:
                 value = json.loads(data or b"{}")

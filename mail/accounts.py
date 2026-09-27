@@ -1,6 +1,7 @@
 """Multi-account management for Laya Mail."""
 from datetime import datetime, timezone
 import json
+import hashlib
 import os
 from pathlib import Path
 import re
@@ -96,8 +97,19 @@ class AccountManager:
             raise AccountError("Bitte eine gültige E-Mail-Adresse angeben.")
 
         if token_filename is None:
-            safe_name = re.sub(r"[^a-z0-9_-]", "_", email.split("@")[0])
-            token_filename = f"token_{safe_name}.json"
+            existing = next((acc for acc in self.data.get("accounts", []) if acc["email"].lower() == email), None)
+            if existing:
+                token_filename = existing["token_file"]
+            else:
+                safe_name = re.sub(r"[^a-z0-9_-]", "_", email.split("@")[0])
+                suffix = hashlib.sha256(email.encode()).hexdigest()[:12]
+                token_filename = f"token_{safe_name}_{suffix}.json"
+        if (not isinstance(token_filename, str)
+                or not re.fullmatch(r"token(?:_[A-Za-z0-9_-]+)?\.json", token_filename)):
+            raise AccountError("Bitte einen lokalen Token-Dateinamen wie token_konto.json angeben.")
+        if any(acc["email"].lower() != email and acc.get("token_file", "").casefold() == token_filename.casefold()
+               for acc in self.data.get("accounts", [])):
+            raise AccountError("Diese Token-Datei gehört bereits zu einem anderen Konto.")
 
         accounts = [acc for acc in self.data.get("accounts", []) if acc["email"].lower() != email]
         accounts.append({

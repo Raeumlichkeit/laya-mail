@@ -13,11 +13,21 @@ from dashboard import Dashboard, Handler, LABELS
 
 
 class DashboardCheck(unittest.TestCase):
+    def setUp(self):
+        # Background scheduling and network health probes are tested separately.
+        self.start_patch = patch("dashboard.LiveWatcher.start")
+        self.start_patch.start()
+        self.addCleanup(self.start_patch.stop)
+        self.health_patch = patch.object(Dashboard, "gpu_status", return_value={"online": False})
+        self.health_patch.start()
+        self.addCleanup(self.health_patch.stop)
+
     def test_private_http_and_review_queue(self):
         with tempfile.TemporaryDirectory() as folder:
             directory = Path(folder)
             key = "synthetic-test-key-not-a-real-credential"
             (directory / "dashboard-key").write_text(key)
+            (directory / "token.json").write_text("{}")
             report = {"input_version": "mail-v2", "created_utc": "2026-09-26T09:00:00Z", "status": "complete", "messages": [{
                 "message_id": "abc123",
                 "model_input": {"model": "multilingual", "state": "Testrechnung <img src=x onerror=alert(1)>",
@@ -129,7 +139,7 @@ class DashboardCheck(unittest.TestCase):
                         self.assertEqual(app.status()["batch_mode"], "next")
                         self.assertEqual(app.status()["requested_limit"], 7)
                         self.assertEqual(app.status()["total"], 7)
-                        self.assertEqual(json.loads((directory / "seen-message-ids.json").read_text()), ["abc123", "def456"])
+                        self.assertEqual(json.loads(app.seen_path(app.account).read_text()), ["abc123", "def456"])
                         self.assertEqual((directory / "feedback.json").read_bytes(), before)
                         worker.assert_called_once_with("next", 7)
                         release.set()
@@ -148,6 +158,7 @@ class DashboardCheck(unittest.TestCase):
             directory = Path(folder)
             key = "synthetic-test-key-not-a-real-credential"
             (directory / "dashboard-key").write_text(key)
+            (directory / "token_second.json").write_text("{}")
             app = Dashboard(directory, "test@example.invalid", "http://127.0.0.1:8000/v1/systemone")
             server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
             origin = "http://127.0.0.1:" + str(server.server_port)
@@ -172,6 +183,8 @@ class DashboardCheck(unittest.TestCase):
                     add_res = client.post(origin + "/api/accounts/add", json={"email": "second@example.invalid"}, headers=headers)
                     self.assertEqual(add_res.status_code, 200)
                     self.assertTrue(any(a["email"] == "second@example.invalid" for a in add_res.json()["accounts"]))
+                    token_name = next(a["token_file"] for a in add_res.json()["accounts"] if a["email"] == "second@example.invalid")
+                    (directory / token_name).write_text("{}")
 
                     sel_res = client.post(origin + "/api/accounts/select", json={"selected": "second@example.invalid"}, headers=headers)
                     self.assertEqual(sel_res.status_code, 200)
@@ -287,6 +300,7 @@ class DashboardCheck(unittest.TestCase):
 
             with patch("labeler.get_or_create_labels", return_value={"FakeLabel": "lbl_1"}), \
                  patch("labeler.apply_labels", side_effect=fake_apply), \
+                 patch("dashboard.gmail_get", return_value={"emailAddress": "test@example.invalid"}), \
                  patch("google.oauth2.credentials.Credentials.from_authorized_user_file", return_value=object()), \
                  patch("google.auth.transport.requests.AuthorizedSession", return_value=unittest.mock.MagicMock()):
                 res = app.apply_current_labels()
@@ -303,6 +317,7 @@ class DashboardCheck(unittest.TestCase):
             # 3. Test report path change during run
             with patch("labeler.get_or_create_labels", return_value={"FakeLabel": "lbl_1"}), \
                  patch("labeler.apply_labels", side_effect=fake_apply), \
+                 patch("dashboard.gmail_get", return_value={"emailAddress": "test@example.invalid"}), \
                  patch("google.oauth2.credentials.Credentials.from_authorized_user_file", return_value=object()), \
                  patch("google.auth.transport.requests.AuthorizedSession", return_value=unittest.mock.MagicMock()):
                 orig_target = app.report_path

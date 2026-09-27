@@ -19,6 +19,7 @@ class BackendCheck(unittest.TestCase):
             directory = Path(folder)
             (directory / "dashboard-key").write_text("synthetic-dashboard-key-for-offline-test")
             (directory / "gpu-api-key").write_text("SYNTHETIC_GPU_SECRET")
+            (directory / "token.json").write_text("{}")
             gpu_url = "http://192.168.50.20:8002/v1/systemone"
             cpu_url = "http://192.168.50.10:8000/v1/systemone"
             config = {"url": gpu_url, "key_file": "gpu-api-key"}
