@@ -5,6 +5,7 @@ from collections import defaultdict
 import copy
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import random
@@ -51,66 +52,116 @@ def parse_args():
     return parser.parse_args()
 
 
-def load_dataset(file_path, val_ratio=0.20, val_file_path=None):
-    if not file_path.is_file():
-        raise FileNotFoundError(f"Training data file not found: {file_path}")
-    raw_lines = [line.strip() for line in file_path.read_text(encoding="utf-8").splitlines() if line.strip()]
-    if not raw_lines:
-        raise ValueError("Dataset is empty. Collect and export reviews from the dashboard first.")
+def validate_sample(sample, location="sample"):
+    """Validate an exported target distribution without echoing email contents."""
+    def invalid(reason):
+        raise ValueError(f"{location}: {reason}") from None
 
-    train_samples = []
-    val_samples = []
-
-    if val_file_path:
-        if not val_file_path.is_file():
-            raise FileNotFoundError(f"Validation data file not found: {val_file_path}")
-        val_lines = [line.strip() for line in val_file_path.read_text(encoding="utf-8").splitlines() if line.strip()]
-        for line in raw_lines:
-            try:
-                item = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if not isinstance(item.get("state"), str) or not isinstance(item.get("questions"), dict) or not isinstance(item.get("gold"), dict):
-                continue
-            train_samples.append(item)
-        for line in val_lines:
-            try:
-                item = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if not isinstance(item.get("state"), str) or not isinstance(item.get("questions"), dict) or not isinstance(item.get("gold"), dict):
-                continue
-            val_samples.append(item)
-        if not val_samples:
-            raise ValueError(f"Validation dataset is empty or contains no valid samples: {val_file_path}")
-        return train_samples, val_samples
-
-    for i, line in enumerate(raw_lines):
-        try:
-            item = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(item.get("state"), str) or not isinstance(item.get("questions"), dict) or not isinstance(item.get("gold"), dict):
-            continue
-        meta = item.get("metadata", {})
-        split = meta.get("split")
-        if split == "val":
-            val_samples.append(item)
-        elif split == "train":
-            train_samples.append(item)
+    if not isinstance(sample, dict):
+        invalid("expected a JSON object")
+    state = sample.get("state")
+    if not isinstance(state, str) or not state.strip():
+        invalid("state must be a nonempty string")
+    try:
+        state.encode("utf-8")
+    except UnicodeError:
+        invalid("state contains invalid Unicode")
+    questions, gold = sample.get("questions"), sample.get("gold")
+    if not isinstance(questions, dict) or not questions or not isinstance(gold, dict) or set(questions) != set(gold):
+        invalid("questions and gold must have the same nonempty set of question IDs")
+    metadata = sample.get("metadata", {})
+    if not isinstance(metadata, dict) or metadata.get("split") not in (None, "train", "val"):
+        invalid("metadata.split must be train or val when supplied")
+    for qid, question in questions.items():
+        if not isinstance(qid, str) or not qid.strip() or not isinstance(question, dict):
+            invalid("question IDs must be nonempty strings with object definitions")
+        kind = question.get("type")
+        if not isinstance(question.get("instructions"), str) or not question["instructions"].strip():
+            invalid("question instructions must be a nonempty string")
+        criteria = question.get("criteria")
+        if kind == "choice":
+            if not isinstance(criteria, dict) or not criteria or any(not isinstance(k, str) or not k.strip() for k in criteria):
+                invalid("choice criteria must be a nonempty object with nonempty string keys")
+            expected = set(criteria)
+        elif kind == "score":
+            if not isinstance(criteria, list) or not criteria:
+                invalid("score criteria must be a nonempty list")
+            expected = {str(i) for i in range(len(criteria))}
+        elif kind == "noul":
+            if criteria is not None and (not isinstance(criteria, dict) or not set(criteria).issubset({"false", "true"})):
+                invalid("noul criteria may only describe false and true")
+            expected = {"false", "true"}
         else:
-            # Deterministic split based on state content hash
-            h = int(hashlib.sha256(item["state"].encode("utf-8")).hexdigest()[:8], 16)
-            if (h % 100) < int(val_ratio * 100):
-                val_samples.append(item)
-            else:
-                train_samples.append(item)
+            invalid("unsupported question type")
+        if "labels" in question:
+            labels = question["labels"]
+            if (kind != "noul" or not isinstance(labels, dict) or set(labels) != {"false", "true"}
+                    or any(not isinstance(v, str) or not v.strip() for v in labels.values())
+                    or labels["false"].strip() == labels["true"].strip()):
+                invalid("custom labels require distinct nonempty noul labels for false and true")
+        answer = gold[qid]
+        if not isinstance(answer, dict) or answer.get("type", kind) != kind:
+            invalid("gold type must match its question")
+        probabilities = answer.get("probabilities")
+        if not isinstance(probabilities, dict) or set(probabilities) != expected:
+            invalid("gold probabilities must match all question options exactly")
+        values = list(probabilities.values())
+        if (any(type(value) not in (int, float) or not 0 <= value <= 1 for value in values)
+                or not math.isclose(sum(values), 1.0, rel_tol=1e-6, abs_tol=1e-6)):
+            invalid("gold probabilities must be finite, nonnegative numbers summing to one")
 
+
+def load_samples(file_path):
+    """Read nonempty UTF-8 JSONL; invalid rows raise a content-free line error."""
+    file_path = Path(file_path)
+    samples = []
+    for number, raw in enumerate(file_path.read_bytes().splitlines(), 1):
+        location = f"{file_path}: line {number}"
+        try:
+            line = raw.decode("utf-8").strip()
+        except UnicodeError:
+            raise ValueError(f"{location}: invalid UTF-8") from None
+        if not line:
+            continue
+        try:
+            sample = json.loads(line)
+        except (ValueError, RecursionError):
+            raise ValueError(f"{location}: invalid JSON") from None
+        validate_sample(sample, location)
+        samples.append(sample)
+    if not samples:
+        raise ValueError(f"{file_path}: dataset is empty; collect and export reviews first")
+    return samples
+
+
+def load_dataset(file_path, val_ratio=0.20, val_file_path=None):
+    samples = load_samples(file_path)
+    if val_file_path:
+        train_samples, val_samples = samples, load_samples(val_file_path)
+        if any(item.get("metadata", {}).get("split") == "val" for item in train_samples):
+            raise ValueError("Training file contains examples marked for validation")
+        if any(item.get("metadata", {}).get("split") == "train" for item in val_samples):
+            raise ValueError("Validation file contains examples marked for training")
+    else:
+        train_samples, val_samples = [], []
+        for item in samples:
+            split = item.get("metadata", {}).get("split")
+            if split is None:
+                h = int(hashlib.sha256(item["state"].encode("utf-8")).hexdigest()[:8], 16)
+                split = "val" if (h % 100) < int(val_ratio * 100) else "train"
+            (val_samples if split == "val" else train_samples).append(item)
+    if not train_samples:
+        raise ValueError("Training split is empty; at least one training example is required")
+    train_states = {sample["state"] for sample in train_samples}
+    if any(sample["state"] in train_states for sample in val_samples):
+        raise ValueError("Training and validation sets overlap; use disjoint state content")
     return train_samples, val_samples
 
 
 def build_sample_items(tok, sample, max_len=1024, head_max_len=256):
-    from laya.common import QTYPES, build_sequence, render_options
+    from laya.common import QTYPES, build_sequence
+
+    validate_sample(sample)
 
     state = sample["state"]
     questions = sample["questions"]
@@ -125,26 +176,26 @@ def build_sample_items(tok, sample, max_len=1024, head_max_len=256):
 
     items = []
     for qid, qdef in questions.items():
-        if qid not in gold:
-            continue
-        t = qdef.get("type", "choice")
-        q_internal = {"t": t, "ins": qdef.get("instructions", qid), "crit": qdef.get("criteria", {})}
+        t = qdef["type"]
+        q_internal = {"t": t, "ins": qdef["instructions"], "crit": qdef.get("criteria", {})}
+        if "labels" in qdef:
+            q_internal["labels"] = qdef["labels"]
         seq, markers = build_sequence(tok, state, q_internal, max_len, head_max_len,
                                       truncate_left=truncate_left, state_ids=state_ids)
         gold_q = gold[qid]
-        target_probs = gold_q.get("probabilities", {})
+        target_probs = gold_q["probabilities"]
 
         # Align target array with criteria order
         if t == "choice":
             criteria_keys = list(q_internal["crit"].keys())
-            target = [float(target_probs.get(k, 0.0)) for k in criteria_keys]
+            target = [float(target_probs[k]) for k in criteria_keys]
         elif t == "score":
-            target = [float(target_probs.get(str(idx), target_probs.get(idx, 0.0))) for idx in range(len(markers))]
+            target = [float(target_probs[str(idx)]) for idx in range(len(q_internal["crit"]))]
         else:
-            target = [float(target_probs.get("false", 0.0)), float(target_probs.get("true", 0.0))]
+            target = [float(target_probs["false"]), float(target_probs["true"])]
 
         if len(target) != len(markers):
-            continue
+            raise ValueError("Tokenized question lost option markers; increase max_len or head_max_len")
 
         items.append({
             "ids": seq,
@@ -183,8 +234,11 @@ def batch_samples(tok, samples, batch_size=4, max_len=1024, head_max_len=256, sh
 def evaluate(model, batches, device):
     import torch
 
+    if not batches:
+        raise ValueError("Validation produced no usable batches")
     model.eval()
     total_loss = 0.0
+    total_rows = 0
     correct = defaultdict(int)
     totals = defaultdict(int)
 
@@ -200,7 +254,10 @@ def evaluate(model, batches, device):
             logits, _ = model(input_ids, attention_mask, marker_pos, marker_mask, qtype)
             log_p = torch.log_softmax(logits, dim=-1)
             loss = -(target * log_p).sum(dim=-1).mean()
-            total_loss += loss.item()
+            if not torch.isfinite(loss).item():
+                raise ValueError("Validation loss is not finite; no checkpoint was saved")
+            total_loss += loss.item() * target.shape[0]
+            total_rows += target.shape[0]
 
             preds = logits.argmax(dim=-1)
             gold_preds = target.argmax(dim=-1)
@@ -210,7 +267,7 @@ def evaluate(model, batches, device):
                     correct[qid] += 1
                 totals[qid] += 1
 
-    avg_loss = total_loss / max(1, len(batches))
+    avg_loss = total_loss / total_rows
     accuracies = {qid: correct[qid] / max(1, totals[qid]) for qid in totals}
     overall_acc = sum(correct.values()) / max(1, sum(totals.values()))
     return avg_loss, accuracies, overall_acc
@@ -221,6 +278,13 @@ def train(args):
     print(" Laya Mail · Fine-Tuning Pipeline (RTX 4070 Ti / CUDA)")
     print("=" * 60)
 
+    if type(getattr(args, "epochs", 5)) is not int or getattr(args, "epochs", 5) < 1:
+        raise ValueError("epochs must be a positive integer")
+    if type(getattr(args, "batch_size", 4)) is not int or getattr(args, "batch_size", 4) < 1:
+        raise ValueError("batch-size must be a positive integer")
+    learning_rate = getattr(args, "lr", 2e-4)
+    if type(learning_rate) not in (int, float) or not 0 < learning_rate < float("inf"):
+        raise ValueError("lr must be a finite positive number")
     val_data = getattr(args, "val_data", None)
     train_samples, val_samples = load_dataset(args.data, val_ratio=getattr(args, "val_ratio", 0.20), val_file_path=val_data)
     print(f"Loaded {len(train_samples)} training samples, {len(val_samples)} validation samples.")
@@ -267,6 +331,8 @@ def train(args):
 
     val_batches = batch_samples(tok, val_samples, batch_size=args.batch_size,
                                 max_len=max_len, head_max_len=head_max_len, shuffle=False)
+    if val_samples and not val_batches:
+        raise ValueError("Validation produced no usable batches")
 
     best_val_loss = float("inf")
     best_weights = None
@@ -276,8 +342,11 @@ def train(args):
         t0 = time.perf_counter()
         train_batches = batch_samples(tok, train_samples, batch_size=args.batch_size,
                                       max_len=max_len, head_max_len=head_max_len, shuffle=True)
+        if not train_batches:
+            raise ValueError("Training produced no usable batches; no checkpoint was saved")
         model.train()
         total_train_loss = 0.0
+        total_train_rows = 0
 
         for b in train_batches:
             optimizer.zero_grad()
@@ -292,11 +361,14 @@ def train(args):
                               detach_encoder=args.freeze_backbone)
             log_p = torch.log_softmax(logits, dim=-1)
             loss = -(target * log_p).sum(dim=-1).mean()
+            if not torch.isfinite(loss).item():
+                raise ValueError("Training loss is not finite; no checkpoint was saved")
             loss.backward()
             optimizer.step()
-            total_train_loss += loss.item()
+            total_train_loss += loss.item() * target.shape[0]
+            total_train_rows += target.shape[0]
 
-        train_loss = total_train_loss / max(1, len(train_batches))
+        train_loss = total_train_loss / total_train_rows
         elapsed = time.perf_counter() - t0
 
         if val_batches:

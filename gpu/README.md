@@ -64,4 +64,24 @@ Sobald im Dashboard Bewertungen gesammelt und als Trainingsdaten (JSONL) herunte
    ```json
    "model_path": "runtime/models/laya-mail-custom"
    ```
-   Oder den GPU-Server direkt mit `--model-path` starten. Der Mac mini nutzt den neuen Checkpoint automatisch beim nächsten Mailstapel.
+   Oder den GPU-Server direkt mit `--model-path` starten. Zuerst laufende Mailstapel abschließen und den Live-Modus ausschalten, dann den GPU-Dienst neu starten. Erst nach dem Neustart nutzt er den neuen Checkpoint.
+
+### Desktop-Trainingsstarter in der bestehenden Workspace-Installation
+
+`Train-Laya-Model.ps1` erwartet die benachbarten Ordner `work` und `laya-mail`. Die Python-Umgebung liegt in `work/laya-gpu-venv`, das Basismodell in `work/laya-gpu/multilingual`. Dashboard-Adresse und Zugangscode werden ausschließlich aus den lokalen Dateien `work/gmail-private/dashboard-url.txt` und `dashboard-key` gelesen; die Adresse kann mit `LAYA_DASHBOARD_URL` überschrieben werden. Der Starter ist auf diese Installationsstruktur ausgelegt.
+
+```powershell
+# Aktuelle Bewertungen herunterladen und prüfen, ohne Training oder Modellwechsel:
+& .\gpu\Train-Laya-Model.ps1 -CheckOnly -NoPause
+
+# Training und Vergleich starten:
+& .\gpu\Train-Laya-Model.ps1
+```
+
+Jeder Lauf erhält einen eigenen Ordner unter `runtime/training/`. Exportfehler, ungültige oder überlappende Trainings-/Validierungsdaten brechen den Lauf ab; alte Daten werden nicht als Ersatz verwendet. Das Training läuft ausdrücklich auf CUDA und speichert einen separaten Kandidaten. Es beginnt jeweils mit dem Basismodell und allen aktuell bewerteten Beispielen.
+
+Der Vergleich verwendet das bisherige Modell aus `runtime/models/laya-mail-custom`, falls vorhanden, ansonsten das Basismodell. Nur bei höherer Gesamtgenauigkeit und ohne Verschlechterung einer einzelnen Frage im Validierungssatz bietet das Fenster die Übernahme mit `j` an. Dabei wird das bisherige Modell als `previous-model` im Laufordner gesichert. Ohne Bestätigung bleibt es unverändert. `-NoPause` übernimmt nie automatisch.
+
+Der Starter startet den GPU-Dienst nicht neu. Nach einer bestätigten Übernahme laufende Mailstapel abschließen, den Live-Modus ausschalten und die Desktop-Verknüpfungen **Laya GPU beenden** und **Laya GPU starten** verwenden. Ein bereits laufender Dienst verwendet bis dahin sein bisher geladenes Modell. Bei einer anderen Installation muss der konfigurierte `model_path` ebenfalls auf `runtime/models/laya-mail-custom` zeigen.
+
+Der Vergleich ist eine Validierung auf den vorhandenen Bewertungen, kein unabhängiger Qualitätsnachweis: Derselbe Validierungssatz wird bereits zur Auswahl der Trainingsepoche verwendet. Trainingsdaten, Kandidaten, Sicherungen und der aggregierte Bericht `evaluation.json` bleiben lokal im ignorierten `runtime`-Ordner.

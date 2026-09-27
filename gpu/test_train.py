@@ -1,24 +1,30 @@
 """Offline tests for training and dataset processing helpers."""
 
+import importlib.util
 import json
+import math
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 import unittest
 
 sys.path.insert(0, str(Path(__file__).parent))
-from train_laya import load_dataset, build_sample_items
+from train_laya import load_dataset, load_samples, validate_sample, build_sample_items, evaluate
 
 
-def _can_import_laya_common():
-    try:
-        import importlib.util
-        return bool(importlib.util.find_spec("laya") and importlib.util.find_spec("laya.common"))
-    except Exception:
-        return False
+HAS_LAYA_COMMON = importlib.util.find_spec("laya") is not None
+HAS_TORCH = importlib.util.find_spec("torch") is not None
 
 
-HAS_LAYA_COMMON = _can_import_laya_common()
+def sample(state="Synthetic training example", split="train"):
+    return {
+        "state": state,
+        "questions": {"inhalt": {"type": "choice", "instructions": "Synthetic choice",
+                                  "criteria": {"a": "First", "b": "Second"}}},
+        "gold": {"inhalt": {"type": "choice", "probabilities": {"a": 1.0, "b": 0.0}}},
+        "metadata": {"split": split},
+    }
 
 
 class TrainingPipelineCheck(unittest.TestCase):
@@ -29,9 +35,9 @@ class TrainingPipelineCheck(unittest.TestCase):
                 {
                     "state": f"Sample message {i}",
                     "questions": {
-                        "inhalt": {"type": "choice", "criteria": {"rechnung": "", "werbung": "", "info": "", "sonstiges": ""}},
-                        "wichtig": {"type": "choice", "criteria": {"ja": "", "nein": ""}},
-                        "spamverdacht": {"type": "choice", "criteria": {"ja": "", "nein": ""}},
+                        "inhalt": {"type": "choice", "instructions": "Synthetic content question", "criteria": {"rechnung": "", "werbung": "", "info": "", "sonstiges": ""}},
+                        "wichtig": {"type": "choice", "instructions": "Synthetic priority question", "criteria": {"ja": "", "nein": ""}},
+                        "spamverdacht": {"type": "choice", "instructions": "Synthetic spam question", "criteria": {"ja": "", "nein": ""}},
                     },
                     "gold": {
                         "inhalt": {"probabilities": {"rechnung": 1.0, "werbung": 0.0, "info": 0.0, "sonstiges": 0.0}},
@@ -88,13 +94,15 @@ class TrainingPipelineCheck(unittest.TestCase):
         self.assertEqual(items[0]["qid"], "inhalt")
         self.assertEqual(items[0]["target"], [1.0, 0.0, 0.0, 0.0])
         self.assertEqual(len(items[0]["markers"]), 4)
+        with self.assertRaisesRegex(ValueError, "lost option markers"):
+            build_sample_items(DummyTok(), sample, max_len=8, head_max_len=64)
 
     def test_train_dry_run(self):
         with tempfile.TemporaryDirectory() as folder:
             data_file = Path(folder) / "test.jsonl"
             sample = {
                 "state": "Test message",
-                "questions": {"inhalt": {"type": "choice", "criteria": {"rechnung": ""}}},
+                "questions": {"inhalt": {"type": "choice", "instructions": "Synthetic", "criteria": {"rechnung": ""}}},
                 "gold": {"inhalt": {"probabilities": {"rechnung": 1.0}}},
                 "metadata": {"split": "train"}
             }
@@ -110,11 +118,12 @@ class TrainingPipelineCheck(unittest.TestCase):
             val_file = Path(folder) / "val.jsonl"
             sample = {
                 "state": "Test message",
-                "questions": {"inhalt": {"type": "choice", "criteria": {"rechnung": ""}}},
+                "questions": {"inhalt": {"type": "choice", "instructions": "Synthetic", "criteria": {"rechnung": ""}}},
                 "gold": {"inhalt": {"probabilities": {"rechnung": 1.0}}},
             }
             train_file.write_text("\n".join(json.dumps(sample) for _ in range(5)), encoding="utf-8")
-            val_file.write_text("\n".join(json.dumps(sample) for _ in range(2)), encoding="utf-8")
+            val_file.write_text("\n".join(json.dumps({**sample, "state": "Separate validation message"})
+                                          for _ in range(2)), encoding="utf-8")
 
             train_samples, val_samples = load_dataset(train_file, val_file_path=val_file)
             self.assertEqual(len(train_samples), 5)
@@ -125,7 +134,7 @@ class TrainingPipelineCheck(unittest.TestCase):
             train_file = Path(folder) / "train_only.jsonl"
             sample = {
                 "state": "Test message",
-                "questions": {"inhalt": {"type": "choice", "criteria": {"rechnung": ""}}},
+                "questions": {"inhalt": {"type": "choice", "instructions": "Synthetic", "criteria": {"rechnung": ""}}},
                 "gold": {"inhalt": {"probabilities": {"rechnung": 1.0}}},
                 "metadata": {"split": "train"}
             }
@@ -142,7 +151,7 @@ class TrainingPipelineCheck(unittest.TestCase):
             empty_val_file = Path(folder) / "empty_val.jsonl"
             sample = {
                 "state": "Test message",
-                "questions": {"inhalt": {"type": "choice", "criteria": {"rechnung": ""}}},
+                "questions": {"inhalt": {"type": "choice", "instructions": "Synthetic", "criteria": {"rechnung": ""}}},
                 "gold": {"inhalt": {"probabilities": {"rechnung": 1.0}}},
             }
             train_file.write_text(json.dumps(sample), encoding="utf-8")
@@ -150,6 +159,108 @@ class TrainingPipelineCheck(unittest.TestCase):
 
             with self.assertRaises(ValueError):
                 load_dataset(train_file, val_file_path=empty_val_file)
+
+    def test_invalid_rows_fail_with_line_number_without_contents(self):
+        bad_samples = [None, [], {**sample(), "state": " "},
+                       {**sample(), "questions": {}, "gold": {}},
+                       {**sample(), "gold": {}}, {**sample(), "metadata": []}]
+        for probabilities in ({"a": 1.0}, {"a": 1.0, "b": 0.0, "c": 0.0},
+                              {"a": 0.0, "b": 0.0}, {"a": -0.1, "b": 1.1},
+                              {"a": float("nan"), "b": 0.0}, {"a": float("inf"), "b": 0.0},
+                              {"a": "1", "b": 0}, {"a": True, "b": False}):
+            bad = sample()
+            bad["gold"]["inhalt"]["probabilities"] = probabilities
+            bad_samples.append(bad)
+        for change in ({"type": "unknown"}, {"type": None}, {"criteria": {}}, {"criteria": []},
+                       {"instructions": None}, {"instructions": " "}):
+            bad = sample()
+            bad["questions"]["inhalt"].update(change)
+            bad_samples.append(bad)
+        bad = sample()
+        bad["gold"]["inhalt"]["type"] = "score"
+        bad_samples.append(bad)
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "rows.jsonl"
+            for row in [json.dumps(item) for item in bad_samples] + ['PRIVATE-CONTENT invalid JSON']:
+                with self.subTest(row_type=row[:1]):
+                    path.write_text(json.dumps(sample()) + "\n\n" + row, encoding="utf-8")
+                    with self.assertRaisesRegex(ValueError, "line 3") as error:
+                        load_samples(path)
+                    self.assertNotIn("PRIVATE-CONTENT", str(error.exception))
+                    self.assertNotIn("Synthetic training example", str(error.exception))
+            path.write_bytes(b"\n\xffPRIVATE-CONTENT")
+            with self.assertRaisesRegex(ValueError, "line 2: invalid UTF-8"):
+                load_samples(path)
+
+    def test_choice_score_and_noul_targets(self):
+        for kind, criteria, probabilities in (
+                ("choice", {"a": "First", "b": "Second"}, {"a": 0.25, "b": 0.75}),
+                ("score", ["Low", "High"], {"0": 0.25, "1": 0.75}),
+                ("noul", {"true": "Present"}, {"false": 0.25, "true": 0.75})):
+            item = {"state": "Synthetic", "questions": {"q": {"type": kind, "instructions": "Synthetic", "criteria": criteria}},
+                    "gold": {"q": {"type": kind, "probabilities": probabilities}}}
+            validate_sample(item)
+            item["gold"]["q"]["probabilities"] = {"wrong": 1.0}
+            with self.assertRaisesRegex(ValueError, "match all question options"):
+                validate_sample(item)
+
+    def test_validation_only_and_overlaps_fail_including_dry_run(self):
+        from argparse import Namespace
+        from train_laya import train
+
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "data.jsonl"
+            val_path = Path(folder) / "val.jsonl"
+            path.write_text(json.dumps(sample(split="val")), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "Training split is empty"):
+                train(Namespace(data=path, val_data=None, dry_run=True))
+            path.write_text("\n".join(json.dumps(sample(split=split)) for split in ("train", "val")),
+                            encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "overlap"):
+                load_dataset(path)
+            path.write_text(json.dumps(sample()), encoding="utf-8")
+            val_path.write_text(json.dumps(sample(split="val")), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "overlap"):
+                load_dataset(path, val_file_path=val_path)
+            path.write_text(json.dumps(sample("Separate state", split="val")), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "marked for validation"):
+                load_dataset(path, val_file_path=val_path)
+
+    def test_imports_do_not_load_torch_during_discovery(self):
+        result = subprocess.run(
+            [sys.executable, "-B", "-c", "import train_laya, test_train; import sys; "
+             "assert 'torch' not in sys.modules"], cwd=Path(__file__).parent,
+            capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipUnless(HAS_TORCH, "CPU tensor checks require torch")
+    def test_validation_loss_weights_question_rows_and_rejects_nonfinite(self):
+        import torch
+
+        class FixedLogits:
+            def eval(self):
+                pass
+
+            def __call__(self, input_ids, *args):
+                return input_ids, None
+
+        def batch(probability, count):
+            logits = torch.tensor([[math.log(probability), math.log(1 - probability)]] * count)
+            return {"input_ids": logits, "attention_mask": torch.ones(count, 2),
+                    "marker_pos": torch.zeros(count, 2), "marker_mask": torch.ones(count, 2, dtype=torch.bool),
+                    "qtype": torch.zeros(count), "target": torch.tensor([[1., 0.]] * count),
+                    "qids": ["inhalt"] * count}
+
+        batches = [batch(0.9, 4), batch(0.1, 1)]
+        loss, accuracies, overall = evaluate(FixedLogits(), batches, "cpu")
+        self.assertAlmostEqual(loss, -(4 * math.log(.9) + math.log(.1)) / 5, places=6)
+        self.assertEqual(accuracies, {"inhalt": .8})
+        self.assertEqual(overall, .8)
+        batches[0]["input_ids"][0, 0] = float("nan")
+        with self.assertRaisesRegex(ValueError, "loss is not finite"):
+            evaluate(FixedLogits(), batches, "cpu")
+        with self.assertRaisesRegex(ValueError, "no usable batches"):
+            evaluate(FixedLogits(), [], "cpu")
 
 
 if __name__ == "__main__":

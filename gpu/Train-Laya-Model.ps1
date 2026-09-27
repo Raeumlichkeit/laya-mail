@@ -1,149 +1,123 @@
+param([switch]$CheckOnly, [switch]$NoPause)
+
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$exitCode = 0
+$runLock = $null
 
-Write-Host ""
-Write-Host "============================================================" -ForegroundColor Cyan
-Write-Host "   Laya Mail - Modelltraining auf NVIDIA RTX 4070 Ti (CUDA)  " -ForegroundColor Cyan
-Write-Host "============================================================" -ForegroundColor Cyan
-Write-Host ""
-
-# Workspace-Pfade ermitteln
-$searchDir = $PSScriptRoot
-$taskRoot = $null
-while ($searchDir) {
-    if ((Test-Path (Join-Path $searchDir 'work')) -and (Test-Path (Join-Path $searchDir 'laya-mail'))) {
-        $taskRoot = $searchDir
-        break
-    }
-    $searchDir = Split-Path $searchDir -Parent
-}
-if (-not $taskRoot) {
-    $taskRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
-}
-
-$pythonPath = Join-Path $taskRoot 'work\laya-gpu-venv\Scripts\python.exe'
-$repoRoot = Join-Path $taskRoot 'laya-mail'
-$trainScript = Join-Path $repoRoot 'gpu\train_laya.py'
-$evalScript = Join-Path $repoRoot 'gpu\evaluate_model.py'
-$baseModel = Join-Path $taskRoot 'work\laya-gpu\multilingual'
-$outputDir = Join-Path $repoRoot 'runtime\models\laya-mail-custom'
-$dashboardKeyPath = Join-Path $taskRoot 'work\gmail-private\dashboard-key'
-$dashboardUrl = if ($env:LAYA_DASHBOARD_URL) { $env:LAYA_DASHBOARD_URL } else {
-    $cfgPath = Join-Path $taskRoot 'work\gmail-private\dashboard-url.txt'
-    if (Test-Path $cfgPath) { (Get-Content $cfgPath -Raw).Trim() } else { 'http://127.0.0.1:8001' }
-}
-$dataDir = Join-Path $repoRoot 'runtime\training'
-New-Item -ItemType Directory -Path $dataDir -Force | Out-Null
-$trainData = Join-Path $dataDir 'laya-mail-train.jsonl'
-$valData = Join-Path $dataDir 'laya-mail-val.jsonl'
-
-# 1. Neueste Daten vom Dashboard abrufen
-Write-Host "[1/4] Lade aktuelle Bewertungen vom Mac mini Dashboard..." -ForegroundColor Yellow
-$exportPy = @"
-import urllib.request, urllib.parse, http.cookiejar, pathlib, sys
-jar = http.cookiejar.CookieJar()
-op = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
-key = pathlib.Path(sys.argv[1]).read_text(encoding='utf-8').strip()
-origin = sys.argv[4].rstrip('/')
-try:
-    login_data = urllib.parse.urlencode({'code': key}).encode()
-    op.open(urllib.request.Request(origin + '/login', data=login_data, headers={'Origin': origin}), timeout=5)
-    train_bytes = op.open(origin + '/api/training-export?split=train', timeout=10).read()
-    val_bytes = op.open(origin + '/api/training-export?split=val', timeout=10).read()
-    if len(train_bytes) > 0 and len(val_bytes) > 0:
-        pathlib.Path(sys.argv[2]).write_bytes(train_bytes)
-        pathlib.Path(sys.argv[3]).write_bytes(val_bytes)
-        print(f'Erfolg: {len(train_bytes.splitlines())} Trainingsbeispiele, {len(val_bytes.splitlines())} Validierungsbeispiele geladen.')
-    else:
-        print('Warnung: Dashboard lieferte leere Daten.', file=sys.stderr)
-except Exception as e:
-    print(f'Hinweis: Dashboard nicht erreichbar ({e}). Verwende vorhandene lokale Trainingsdaten.', file=sys.stderr)
-"@
-
-$exportScriptPath = Join-Path $env:TEMP 'laya_export_runner.py'
-Set-Content -Path $exportScriptPath -Value $exportPy -Encoding UTF8
-& $pythonPath $exportScriptPath $dashboardKeyPath $trainData $valData $dashboardUrl
-Remove-Item -Path $exportScriptPath -Force -ErrorAction SilentlyContinue
-
-# Fallback auf Projekt-Root falls runtime/training leer
-if (-not (Test-Path $trainData) -or (Get-Item $trainData).Length -eq 0) {
-    $altTrain = Join-Path $repoRoot 'laya-mail-train.jsonl'
-    $altVal = Join-Path $repoRoot 'laya-mail-val.jsonl'
-    if ((Test-Path $altTrain) -and (Test-Path $altVal)) {
-        Copy-Item $altTrain $trainData -Force
-        Copy-Item $altVal $valData -Force
-    }
-}
-
-if (-not (Test-Path $trainData) -or (Get-Item $trainData).Length -eq 0) {
-    Write-Host "Fehler: Keine Trainingsdaten verfuegbar. Bitte zuerst Mails im Dashboard bewerten!" -ForegroundColor Red
-    Write-Host ""
-    Read-Host "Druecke Enter zum Schliessen..."
-    exit 1
-}
-
-# 2. Feinabstimmung auf RTX 4070 Ti
-Write-Host ""
-Write-Host "[2/4] Starte Feinabstimmung (Head-Tuning) auf RTX 4070 Ti..." -ForegroundColor Yellow
-& $pythonPath -u $trainScript `
-  --data $trainData `
-  --val-data $valData `
-  --base-model $baseModel `
-  --output-dir $outputDir `
-  --epochs 8 `
-  --lr 3e-4 `
-  --batch-size 8
-
-if ($LASTEXITCODE -ne 0) {
-    Write-Host "Fehler beim Modelltraining aufgetreten!" -ForegroundColor Red
-    Write-Host ""
-    Read-Host "Druecke Enter zum Schliessen..."
-    exit 1
-}
-
-# 3. Evaluation
-Write-Host ""
-Write-Host "[3/4] Evaluierung des trainierten Modells gegen das Basismodell..." -ForegroundColor Yellow
-& $pythonPath -u $evalScript `
-  --data $valData `
-  --model $outputDir `
-  --baseline $baseModel
-
-# 4. GPU-Dienst bei Bedarf neu laden
-Write-Host ""
-Write-Host "[4/4] Pruefe GPU-Dienst Status..." -ForegroundColor Yellow
-$outputsDir = Join-Path $taskRoot 'outputs\laya-gpu'
-$stopScript = Join-Path $outputsDir 'Stop-Laya-GPU.ps1'
-$startScript = Join-Path $outputsDir 'Start-Laya-GPU.ps1'
-
-$wasRunning = $false
 try {
-    $status = Invoke-RestMethod -Uri 'http://127.0.0.1:8002/health' -TimeoutSec 2
-    if ($status.status -eq 'ok') { $wasRunning = $true }
-} catch {}
+    Write-Host "`nLaya Mail - GPU-Modelltraining" -ForegroundColor Cyan
 
-if ($wasRunning) {
-    Write-Host "Laufender GPU-Dienst wird neu geladen, um das neue Modell zu nutzen..." -ForegroundColor Cyan
-    if (Test-Path $stopScript) { & $stopScript }
-    Start-Sleep -Seconds 1
-    if (Test-Path $startScript) { & $startScript }
-    Write-Host "Warte kurz auf CUDA-Initialisierung..." -ForegroundColor Gray
-    for ($i = 0; $i -lt 15; $i++) {
-        Start-Sleep -Seconds 1
-        try {
-            $h = Invoke-RestMethod -Uri 'http://127.0.0.1:8002/health' -TimeoutSec 1
-            if ($h.status -eq 'ok' -and $h.device -eq 'cuda') { break }
-        } catch {}
+    # Works from the repository and the installed desktop launcher directory.
+    $searchDir = $PSScriptRoot
+    $taskRoot = $null
+    while ($searchDir) {
+        if ((Test-Path (Join-Path $searchDir 'work')) -and (Test-Path (Join-Path $searchDir 'laya-mail'))) {
+            $taskRoot = $searchDir
+            break
+        }
+        $searchDir = Split-Path $searchDir -Parent
     }
-    Write-Host "GPU-Dienst laeuft jetzt mit dem neu trainierten Modell." -ForegroundColor Green
-} else {
-    Write-Host "GPU-Dienst ist derzeit gestoppt (wird beim Klick auf 'Start GPU' automatisch mit dem neuen Modell gestartet)." -ForegroundColor Gray
+    if (-not $taskRoot) { throw 'Laya-Arbeitsordner mit work und laya-mail wurde nicht gefunden.' }
+
+    $pythonPath = Join-Path $taskRoot 'work\laya-gpu-venv\Scripts\python.exe'
+    $repoRoot = Join-Path $taskRoot 'laya-mail'
+    $trainScript = Join-Path $repoRoot 'gpu\train_laya.py'
+    $evalScript = Join-Path $repoRoot 'gpu\evaluate_model.py'
+    $exportScript = Join-Path $repoRoot 'gpu\export_training_data.py'
+    $baseModel = Join-Path $taskRoot 'work\laya-gpu\multilingual'
+    $activeModel = Join-Path $repoRoot 'runtime\models\laya-mail-custom'
+    $dashboardKeyPath = Join-Path $taskRoot 'work\gmail-private\dashboard-key'
+    $dashboardUrl = $env:LAYA_DASHBOARD_URL
+    if (-not $dashboardUrl) {
+        $urlFile = Join-Path $taskRoot 'work\gmail-private\dashboard-url.txt'
+        if (-not (Test-Path -LiteralPath $urlFile)) { throw 'Dashboard-Adresse fehlt in dashboard-url.txt oder LAYA_DASHBOARD_URL.' }
+        $dashboardUrl = (Get-Content -LiteralPath $urlFile -Raw).Trim()
+    }
+    foreach ($path in @($pythonPath, $trainScript, $evalScript, $exportScript, $dashboardKeyPath,
+                         (Join-Path $baseModel 'model.safetensors'), (Join-Path $baseModel 'rl_agent_config.json'))) {
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Erforderliche Datei fehlt: $path" }
+    }
+
+    $runsRoot = Join-Path $repoRoot 'runtime\training'
+    New-Item -ItemType Directory -Path $runsRoot -Force | Out-Null
+    try {
+        $runLock = [System.IO.File]::Open((Join-Path $runsRoot '.training.lock'), 'OpenOrCreate', 'ReadWrite', 'None')
+    } catch { throw 'Ein anderer Trainingslauf ist bereits geoeffnet. Bitte zuerst dessen Fenster schliessen.' }
+    $runId = (Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + [guid]::NewGuid().ToString('N').Substring(0, 8)
+    $runDir = Join-Path $runsRoot $runId
+    $trainData = Join-Path $runDir 'laya-mail-train.jsonl'
+    $valData = Join-Path $runDir 'laya-mail-val.jsonl'
+    $candidate = Join-Path $runDir 'model'
+    $reportFile = Join-Path $runDir 'evaluation.json'
+
+    Write-Host "`n[1/4] Lade und pruefe die aktuellen Bewertungen..." -ForegroundColor Yellow
+    & $pythonPath $exportScript --url $dashboardUrl --key-file $dashboardKeyPath --output-dir $runDir
+    if ($LASTEXITCODE -ne 0) { throw 'Datenexport fehlgeschlagen. Es wird kein Training gestartet.' }
+    & $pythonPath $trainScript --data $trainData --val-data $valData --dry-run
+    if ($LASTEXITCODE -ne 0) { throw 'Die Trainingsdaten sind ungueltig.' }
+
+    if ($CheckOnly) {
+        Write-Host "`nPruefung erfolgreich. Kein Training und keine Modellaenderung ausgefuehrt." -ForegroundColor Green
+    } else {
+        $env:HF_HUB_OFFLINE = '1'
+        $env:TRANSFORMERS_OFFLINE = '1'
+        $env:TORCH_DISABLE_NATIVE_JIT = '1'
+        Write-Host "`n[2/4] Trainiere einen separaten Kandidaten auf CUDA..." -ForegroundColor Yellow
+        & $pythonPath -u $trainScript --data $trainData --val-data $valData --base-model $baseModel `
+            --output-dir $candidate --epochs 8 --lr 3e-4 --batch-size 8 --device cuda
+        if ($LASTEXITCODE -ne 0) { throw 'Training fehlgeschlagen. Das bisherige Modell bleibt erhalten.' }
+
+        $baseline = $baseModel
+        if (Test-Path -LiteralPath (Join-Path $activeModel 'model.safetensors')) { $baseline = $activeModel }
+        Write-Host "`n[3/4] Vergleiche den Kandidaten mit dem bisherigen Modell..." -ForegroundColor Yellow
+        & $pythonPath -u $evalScript --data $valData --model $candidate --baseline $baseline --device cuda --report $reportFile
+        if ($LASTEXITCODE -ne 0) { throw 'Modellvergleich fehlgeschlagen. Der Kandidat wird nicht uebernommen.' }
+        $report = Get-Content -LiteralPath $reportFile -Raw | ConvertFrom-Json
+
+        Write-Host "`n[4/4] Training und Modellvergleich abgeschlossen." -ForegroundColor Green
+        Write-Host "Kandidat: $candidate"
+        Write-Host "Vergleich: $reportFile"
+        if ($report.improved -eq $true -and $report.nonregressed -eq $true) {
+            Write-Host 'Im Validierungssatz insgesamt besser und bei keiner Frage schlechter.' -ForegroundColor Green
+            $answer = if ($NoPause) { 'n' } else { Read-Host 'Neues Modell fuer den naechsten GPU-Start vormerken? [j/N]' }
+            if ($answer -match '^(j|ja)$') {
+                $backup = Join-Path $runDir 'previous-model'
+                $runtimePrefix = [System.IO.Path]::GetFullPath((Join-Path $repoRoot 'runtime')) + [System.IO.Path]::DirectorySeparatorChar
+                foreach ($modelPath in @($activeModel, $candidate, $backup)) {
+                    if (-not [System.IO.Path]::GetFullPath($modelPath).StartsWith($runtimePrefix, [StringComparison]::OrdinalIgnoreCase)) {
+                        throw 'Modellpfad liegt ausserhalb des lokalen runtime-Ordners.'
+                    }
+                }
+                $hadModel = Test-Path -LiteralPath $activeModel
+                if ($hadModel) { Move-Item -LiteralPath $activeModel -Destination $backup }
+                try {
+                    New-Item -ItemType Directory -Path (Split-Path $activeModel -Parent) -Force | Out-Null
+                    Move-Item -LiteralPath $candidate -Destination $activeModel
+                } catch {
+                    if ($hadModel -and -not (Test-Path -LiteralPath $activeModel)) {
+                        Move-Item -LiteralPath $backup -Destination $activeModel
+                    }
+                    throw
+                }
+                Write-Host 'Neues Modell vorgemerkt. Ein laufender GPU-Dienst nutzt weiterhin das alte Modell.' -ForegroundColor Cyan
+                Write-Host 'Wenn keine Mails ausgewertet werden und der Live-Modus aus ist:'
+                Write-Host 'Auf dem Desktop zuerst Laya GPU beenden, dann Laya GPU starten.'
+                if ($hadModel) { Write-Host "Bisheriges Modell gesichert: $backup" }
+            } else {
+                Write-Host 'Kandidat gespeichert; das bisherige Modell bleibt ausgewaehlt.'
+            }
+        } else {
+            Write-Host 'Kein eindeutiger Fortschritt im Validierungssatz. Das bisherige Modell bleibt ausgewaehlt.' -ForegroundColor Yellow
+        }
+        Write-Host 'Der GPU-Dienst wurde nicht neu gestartet.'
+    }
+} catch {
+    $exitCode = 1
+    Write-Host "`nAbgebrochen: $($_.Exception.Message)" -ForegroundColor Red
+} finally {
+    if ($runLock) { $runLock.Dispose() }
 }
 
-Write-Host ""
-Write-Host "============================================================" -ForegroundColor Green
-Write-Host " Training erfolgreich abgeschlossen!" -ForegroundColor Green
-Write-Host " Das neue Modell ist ab sofort einsatzbereit." -ForegroundColor Green
-Write-Host "============================================================" -ForegroundColor Green
-Write-Host ""
-Read-Host "Druecke Enter zum Beenden..."
+if (-not $NoPause) { Read-Host "`nDruecke Enter zum Schliessen" | Out-Null }
+exit $exitCode
