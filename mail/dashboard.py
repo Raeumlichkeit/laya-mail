@@ -30,6 +30,23 @@ except ImportError:
 
 LABELS = {"inhalt": {"rechnung", "info", "werbung", "sonstiges"},
           "wichtig": {"ja", "nein"}, "spamverdacht": {"ja", "nein"}}
+PILOT_FAILURE_MESSAGES = {
+    "modify_token_required": "Die Gmail-Freigabe erlaubt nur Lesen. Für Sortieren die Anmeldung mit gmail.modify erneuern oder Sortieren deaktivieren.",
+    "readonly_token_required": "Der Gmail-Anmeldung fehlt eine gültige Lesefreigabe. Bitte die Anmeldung erneuern.",
+    "account_mismatch": "Die Gmail-Anmeldung gehört nicht zum ausgewählten Postfach. Bitte die Kontozuordnung prüfen.",
+    "label_initialization_failed": "Die Gmail-Labels konnten nicht vorbereitet werden. Bitte Schreibfreigabe und Verbindung prüfen.",
+    "gmail_request_failed": "Gmail konnte nicht erreicht werden. Bitte Anmeldung und Verbindung prüfen.",
+    "laya_key_missing": "Der API-Schlüssel für das ausgewählte Laya-Modell fehlt.",
+    "output_directory_not_private": "Das Verzeichnis für die Auswertung ist nicht ausreichend geschützt. Bitte die Dateirechte prüfen.",
+    "output_destination_unavailable": "Der neue Auswertungsbericht kann am vorgesehenen Ort nicht gespeichert werden.",
+}
+
+
+def pilot_failure_message(stderr):
+    prefix = "Pilot fehlgeschlagen: "
+    if isinstance(stderr, str) and stderr.startswith(prefix):
+        return PILOT_FAILURE_MESSAGES.get(stderr[len(prefix):].strip())
+    return None
 
 
 class FeedbackError(ValueError):
@@ -606,8 +623,10 @@ class Dashboard:
                     save_report(self.directory / "progress.json", {"processed": 0, "total": quota})
                     save_report(self.directory / "status.json", self.state)
                 result = subprocess.run(command, capture_output=True, text=True, timeout=max(900, quota * 20))
+                pilot_error = None
                 if result.returncode:
-                    errors.append("Ein Postfach konnte nicht vollständig ausgewertet oder sortiert werden.")
+                    pilot_error = pilot_failure_message(getattr(result, "stderr", None))
+                    errors.append(pilot_error or "Ein Postfach konnte nicht vollständig ausgewertet oder sortiert werden.")
                 if account_report_path.exists():
                     rep = json.loads(account_report_path.read_text(encoding="utf-8"))
                     report["limitations"] = rep.get("limitations", [])
@@ -617,7 +636,7 @@ class Dashboard:
                     if rep.get("status") == "error":
                         errors.append("Ein Postfach meldet Fehler; bitte die Nachrichtenhinweise prüfen.")
                     account_report_path.unlink(missing_ok=True)
-                else:
+                elif not pilot_error:
                     errors.append("Für ein Postfach wurde kein Auswertungsbericht erstellt.")
             except (OSError, ValueError, KeyError, TypeError, subprocess.TimeoutExpired):
                 errors.append("Ein Postfachlauf wurde abgebrochen oder lieferte einen ungültigen Bericht.")
@@ -631,7 +650,7 @@ class Dashboard:
             count = len(all_rows)
             report.update(status="error" if error else "complete", messages=all_rows)
             try:
-                if count or not getattr(self, "_run_live", False):
+                if count or (not error and not getattr(self, "_run_live", False)):
                     save_report(report_path, report)
                     self.report_path = report_path
             except OSError:

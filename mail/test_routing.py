@@ -162,6 +162,43 @@ class RoutingCheck(unittest.TestCase):
         self.assertEqual(len(self.app.report()["messages"]), 1)
         self.assertTrue(self.app.report()["messages"][0]["label_error"])
 
+    def test_missing_modify_scope_explains_recovery_and_preserves_previous_report(self):
+        self.app.accounts_mgr.select(PRIMARY)
+        self.app.settings["sort_inbox"] = True
+        self.set_report([message(PRIMARY, format(index, "x")) for index in range(100)])
+        previous = self.app.report_path
+        contents = previous.read_bytes()
+        result = SimpleNamespace(returncode=1, stderr="Pilot fehlgeschlagen: modify_token_required\n")
+        with patch("dashboard.subprocess.run", return_value=result) as run:
+            self.app.run()
+        self.assertIn("--apply-labels", run.call_args.args[0])
+        self.assertEqual(self.app.state["phase"], "error")
+        self.assertEqual(self.app.state["error"],
+                         "Die Gmail-Freigabe erlaubt nur Lesen. Für Sortieren die Anmeldung mit gmail.modify erneuern oder Sortieren deaktivieren.")
+        self.assertEqual(self.app.report_path, previous)
+        self.assertEqual(previous.read_bytes(), contents)
+        self.assertEqual(list(self.directory.glob("pilot-*.json")), [previous])
+        self.assertEqual(len(self.app.report()["messages"]), 100)
+        saved_status = json.loads((self.directory / "status.json").read_text(encoding="utf-8"))
+        self.assertEqual(saved_status["error"], self.app.state["error"])
+
+    def test_unknown_or_extended_stderr_never_leaks_or_replaces_previous_report(self):
+        self.app.accounts_mgr.select(PRIMARY)
+        self.set_report([message(PRIMARY)])
+        previous = self.app.report_path
+        secret = "PRIVATE-RESPONSE-AND-TOKEN"
+        for stderr in (secret, "Pilot fehlgeschlagen: unknown_" + secret,
+                       "Pilot fehlgeschlagen: modify_token_required " + secret,
+                       "Pilot fehlgeschlagen: modify_token_required\n" + secret):
+            with self.subTest(stderr=stderr), patch("dashboard.subprocess.run", return_value=SimpleNamespace(returncode=1, stderr=stderr)):
+                self.app.run()
+            self.assertEqual(self.app.state["phase"], "error")
+            self.assertIn("kein Auswertungsbericht", self.app.state["error"])
+            self.assertNotIn(secret, json.dumps(self.app.state))
+            self.assertNotIn(secret, (self.directory / "status.json").read_text(encoding="utf-8"))
+            self.assertEqual(self.app.report_path, previous)
+            self.assertEqual(list(self.directory.glob("pilot-*.json")), [previous])
+
 
 if __name__ == "__main__":
     unittest.main()
