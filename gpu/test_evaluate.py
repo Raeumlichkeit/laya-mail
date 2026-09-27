@@ -114,8 +114,25 @@ class EvaluationCheck(unittest.TestCase):
             self.assertTrue(result["improved"])
             self.assertFalse(result["nonregressed"])
             self.assertEqual(result["candidate"]["sample_count"], 1)
+            self.assertEqual(result["candidate"]["confusion_by_question"]["wichtig"], {"ja": {"nein": 1}})
             self.assertEqual(result["baseline"]["overall_accuracy"], 1 / 3)
             self.assertNotIn(sample()["state"], output.getvalue() + report.read_text(encoding="utf-8"))
+
+    def test_all_question_confusions_distinguish_false_positives_and_false_negatives(self):
+        rows, predictions = [], []
+        for actual, predicted in (("ja", "ja"), ("ja", "nein"), ("nein", "ja"), ("nein", "nein")):
+            row = sample()
+            row["gold"]["wichtig"]["probabilities"] = {label: float(label == actual) for label in ("ja", "nein")}
+            rows.append(row)
+            predictions.append(FakeAgent({**CHOICES, "wichtig": predicted}).predict(None, None))
+        result = evaluation.run_eval(Mock(predict=Mock(side_effect=predictions)), rows)
+        matrices = result["confusion_by_question"]
+        self.assertEqual(set(matrices), set(CHOICES))
+        self.assertEqual(matrices["wichtig"], {"ja": {"ja": 1, "nein": 1}, "nein": {"ja": 1, "nein": 1}})
+        self.assertEqual(matrices["spamverdacht"], {"nein": {"nein": 4}})
+        self.assertEqual(matrices["inhalt"], result["confusion_inhalt"])
+        for matrix in matrices.values():
+            self.assertEqual(sum(sum(counts.values()) for counts in matrix.values()), 4)
 
     def test_failures_are_redacted_do_not_load_baseline_and_do_not_write_success_report(self):
         with TemporaryDirectory() as folder:

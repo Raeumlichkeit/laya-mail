@@ -11,6 +11,7 @@ from pathlib import Path
 import random
 import shutil
 import sys
+import tempfile
 import time
 
 # Resolve project roots
@@ -41,6 +42,12 @@ def parse_args():
     parser.add_argument("--epochs", type=int, default=5, help="Number of training epochs (default: 5)")
     parser.add_argument("--lr", type=float, default=2e-4, help="Learning rate (default: 2e-4)")
     parser.add_argument("--batch-size", type=int, default=4, help="Batch size in samples (default: 4)")
+    parser.add_argument("--seed", type=int, default=None, help="Optional fixed random seed")
+    parser.add_argument("--history", type=Path, default=None, help="Atomically updated aggregate epoch history JSON")
+    parser.add_argument("--patience", type=int, default=0, help="Stop after this many epochs without lower validation loss; 0 disables")
+    parser.add_argument("--min-epochs", type=int, default=1, help="Earliest epoch at which early stopping is allowed")
+    parser.add_argument("--compare-epoch", type=int, default=0,
+                        help="Also save the best checkpoints through/after this epoch; 0 disables")
     parser.add_argument("--freeze-backbone", action="store_true", default=True,
                         help="Freeze the transformer encoder and only train decision heads (default: True)")
     parser.add_argument("--no-freeze-backbone", dest="freeze_backbone", action="store_false",
@@ -273,6 +280,77 @@ def evaluate(model, batches, device):
     return avg_loss, accuracies, overall_acc
 
 
+def set_seed(seed):
+    if seed is None:
+        return
+    import numpy as np
+    import torch
+
+    random.seed(seed)
+    np.random.seed(seed % (2 ** 32))
+    torch.manual_seed(seed % (2 ** 64))
+    torch.cuda.manual_seed_all(seed % (2 ** 64))
+
+
+def write_history(path, history):
+    if path is None:
+        return
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(prefix="." + path.name + "-", dir=path.parent)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as output:
+            json.dump(history, output, indent=2, allow_nan=False)
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary, path)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+
+
+def record_epoch(history, row):
+    """Return checkpoint decisions; selection and stopping use validation loss only."""
+    history["epochs"].append(row)
+    epoch = row["epoch"]
+    validation = [item for item in history["epochs"] if item["val_loss"] is not None]
+    best = min(validation, key=lambda item: item["val_loss"]) if validation else row
+    history["best_epoch"] = best["epoch"]
+    history["completed_epochs"] = epoch
+    boundary = history["compare_epoch"]
+    through = [item for item in validation if item["epoch"] <= boundary] if boundary else []
+    after = [item for item in validation if item["epoch"] > boundary] if boundary else []
+    history["best_through_epoch"] = min(through, key=lambda item: item["val_loss"])["epoch"] if through else None
+    history["best_after_epoch"] = min(after, key=lambda item: item["val_loss"])["epoch"] if after else None
+    history["stopped_early"] = bool(validation and history["patience"]
+                                    and history["min_epochs"] <= epoch < history["requested_epochs"]
+                                    and epoch - best["epoch"] >= history["patience"])
+    return (bool(validation and best["epoch"] == epoch),
+            bool(boundary and epoch == boundary),
+            bool(boundary and history["best_after_epoch"] == epoch))
+
+
+def save_checkpoint(path, weights, config, args, completed_epochs, best_epoch):
+    from safetensors.torch import save_file
+
+    path.mkdir(parents=True, exist_ok=True)
+    save_file(weights, str(path / "model.safetensors"))
+    for folder in ("encoder", "tokenizer"):
+        src, dst = args.base_model / folder, path / folder
+        if src.is_dir() and not dst.is_dir():
+            shutil.copytree(src, dst)
+    cfg = copy.deepcopy(config)
+    cfg["training"] = {
+        "fine_tuned_from_checkpoint": True,
+        "epochs_requested": args.epochs,
+        "epochs_completed": completed_epochs,
+        "best_epoch": best_epoch,
+        "seed": getattr(args, "seed", None),
+        "base_model": str(args.base_model.name),
+        "created_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    (path / "rl_agent_config.json").write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+
+
 def train(args):
     print("=" * 60)
     print(" Laya Mail · Fine-Tuning Pipeline (RTX 4070 Ti / CUDA)")
@@ -285,9 +363,26 @@ def train(args):
     learning_rate = getattr(args, "lr", 2e-4)
     if type(learning_rate) not in (int, float) or not 0 < learning_rate < float("inf"):
         raise ValueError("lr must be a finite positive number")
+    seed = getattr(args, "seed", None)
+    history_path = getattr(args, "history", None)
+    patience = getattr(args, "patience", 0)
+    min_epochs = getattr(args, "min_epochs", 1)
+    compare_epoch = getattr(args, "compare_epoch", 0)
+    if seed is not None and type(seed) is not int:
+        raise ValueError("seed must be an integer")
+    if type(patience) is not int or patience < 0:
+        raise ValueError("patience must be a nonnegative integer")
+    if type(min_epochs) is not int or not 1 <= min_epochs <= getattr(args, "epochs", 5):
+        raise ValueError("min-epochs must be between 1 and epochs")
+    if type(compare_epoch) is not int or not 0 <= compare_epoch < getattr(args, "epochs", 5):
+        raise ValueError("compare-epoch must be nonnegative and below epochs")
+    if compare_epoch and patience and min_epochs <= compare_epoch:
+        raise ValueError("min-epochs must exceed compare-epoch when early stopping is enabled")
     val_data = getattr(args, "val_data", None)
     train_samples, val_samples = load_dataset(args.data, val_ratio=getattr(args, "val_ratio", 0.20), val_file_path=val_data)
     print(f"Loaded {len(train_samples)} training samples, {len(val_samples)} validation samples.")
+    if (patience or compare_epoch) and not val_samples:
+        raise ValueError("Early stopping and checkpoint comparison require validation samples")
 
     if args.dry_run:
         print("[Dry-Run] Dataset validation successful. Exiting without training.")
@@ -297,9 +392,9 @@ def train(args):
         raise FileNotFoundError(f"Base model directory not found: {args.base_model}")
 
     import torch
-    from safetensors.torch import save_file
     import laya
 
+    set_seed(seed)
     device_str = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
     device = torch.device(device_str)
 
@@ -334,8 +429,12 @@ def train(args):
     if val_samples and not val_batches:
         raise ValueError("Validation produced no usable batches")
 
-    best_val_loss = float("inf")
     best_weights = None
+    history = {"schema_version": 1, "seed": seed, "compare_epoch": compare_epoch,
+               "patience": patience, "min_epochs": min_epochs, "requested_epochs": args.epochs,
+               "epochs": [], "best_epoch": None, "completed_epochs": 0, "stopped_early": False,
+               "best_through_epoch": None, "best_after_epoch": None}
+    write_history(history_path, history)
 
     print("\nStarting training loop...")
     for epoch in range(1, args.epochs + 1):
@@ -369,43 +468,50 @@ def train(args):
             total_train_rows += target.shape[0]
 
         train_loss = total_train_loss / total_train_rows
-        elapsed = time.perf_counter() - t0
+        train_seconds = time.perf_counter() - t0
+        validation_start = time.perf_counter()
+        val_loss, val_accs, val_overall = None, {}, None
 
         if val_batches:
             val_loss, val_accs, val_overall = evaluate(model, val_batches, device)
+        validation_seconds = time.perf_counter() - validation_start
+        row = {"epoch": epoch, "train_loss": train_loss, "val_loss": val_loss,
+               "val_accuracies": val_accs, "val_overall": val_overall,
+               "train_seconds": train_seconds, "validation_seconds": validation_seconds,
+               "checkpoint_seconds": 0.0, "seconds": 0.0}
+        improved, save_through, save_after = record_epoch(history, row)
+        checkpoint_start = time.perf_counter()
+        if improved:
+            best_weights = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+        if save_through:
+            save_checkpoint(args.output_dir / f"best-through-{compare_epoch}", best_weights,
+                            agent.cfg, args, epoch, history["best_through_epoch"])
+        if save_after:
+            later_weights = best_weights if improved else {k: v.cpu() for k, v in model.state_dict().items()}
+            save_checkpoint(args.output_dir / f"best-after-{compare_epoch}", later_weights,
+                            agent.cfg, args, epoch, history["best_after_epoch"])
+            del later_weights
+        row["checkpoint_seconds"] = time.perf_counter() - checkpoint_start
+        row["seconds"] = time.perf_counter() - t0
+        write_history(history_path, history)
+        suffix = "(No validation set)"
+        if val_loss is not None:
             acc_str = " · ".join(f"{k}: {v * 100:.1f}%" for k, v in val_accs.items())
-            print(f"Epoch {epoch:2d}/{args.epochs:2d} ({elapsed:.1f}s) | Train Loss: {train_loss:.4f} | "
-                  f"Val Loss: {val_loss:.4f} | Overall: {val_overall * 100:.1f}% [{acc_str}]")
+            suffix = f"Val Loss: {val_loss:.4f} | Overall: {val_overall * 100:.1f}% [{acc_str}]"
+        print(f"Epoch {epoch:2d}/{args.epochs:2d} ({row['seconds']:.1f}s) | Train Loss: {train_loss:.4f} | {suffix}")
+        if history["stopped_early"]:
+            print(f"Early stopping after epoch {epoch}; best validation epoch was {history['best_epoch']}.")
+            break
 
-            if val_loss < best_val_loss:
-                best_val_loss = val_loss
-                best_weights = {k: v.cpu().clone() for k, v in model.state_dict().items()}
-        else:
-            print(f"Epoch {epoch:2d}/{args.epochs:2d} ({elapsed:.1f}s) | Train Loss: {train_loss:.4f} | (No validation set)")
-
-    print("\nTraining completed.")
-    args.output_dir.mkdir(parents=True, exist_ok=True)
-
-    # Save model weights and configuration
-    print(f"Saving checkpoint to: {args.output_dir}")
+    print(f"\nTraining completed. Saving checkpoint to: {args.output_dir}")
+    checkpoint_start = time.perf_counter()
     weights_to_save = best_weights if best_weights is not None else {k: v.cpu() for k, v in model.state_dict().items()}
-    save_file(weights_to_save, str(args.output_dir / "model.safetensors"))
-
-    # Copy encoder and tokenizer directories and base config
-    for folder in ("encoder", "tokenizer"):
-        src = args.base_model / folder
-        dst = args.output_dir / folder
-        if src.is_dir() and not dst.is_dir():
-            shutil.copytree(src, dst)
-
-    cfg = copy.deepcopy(agent.cfg)
-    cfg["training"] = {
-        "fine_tuned_from_checkpoint": True,
-        "epochs_completed": args.epochs,
-        "base_model": str(args.base_model.name),
-        "created_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-    }
-    (args.output_dir / "rl_agent_config.json").write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+    save_checkpoint(args.output_dir, weights_to_save, agent.cfg, args,
+                    history["completed_epochs"], history["best_epoch"])
+    final_checkpoint_seconds = time.perf_counter() - checkpoint_start
+    history["epochs"][-1]["checkpoint_seconds"] += final_checkpoint_seconds
+    history["epochs"][-1]["seconds"] += final_checkpoint_seconds
+    write_history(history_path, history)
     print(f"Checkpoint successfully saved. To serve it with the GPU service:")
     print(f'Set "model_path": "{args.output_dir}" in gpu/config.local.json and restart.')
     return 0

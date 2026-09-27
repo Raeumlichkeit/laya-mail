@@ -85,3 +85,18 @@ Der Vergleich verwendet das bisherige Modell aus `runtime/models/laya-mail-custo
 Der Starter startet den GPU-Dienst nicht neu. Nach einer bestätigten Übernahme laufende Mailstapel abschließen, den Live-Modus ausschalten und die Desktop-Verknüpfungen **Laya GPU beenden** und **Laya GPU starten** verwenden. Ein bereits laufender Dienst verwendet bis dahin sein bisher geladenes Modell. Bei einer anderen Installation muss der konfigurierte `model_path` ebenfalls auf `runtime/models/laya-mail-custom` zeigen.
 
 Der Vergleich ist eine Validierung auf den vorhandenen Bewertungen, kein unabhängiger Qualitätsnachweis: Derselbe Validierungssatz wird bereits zur Auswahl der Trainingsepoche verwendet. Trainingsdaten, Kandidaten, Sicherungen und der aggregierte Bericht `evaluation.json` bleiben lokal im ignorierten `runtime`-Ordner.
+
+### Zusätzliche Epochen kontrolliert vergleichen
+
+Unter Windows kann `gpu/epoch_experiment.py` einen abgeschlossenen Lauf mit festem Seed und unveränderten Datensätzen nachstellen. Ein einziger Trainingslauf speichert den besten Stand bis einschließlich Epoche 8 und den besten Stand danach, ausgewählt nach Validierungsfehler. Maximal werden 20 Epochen trainiert; ab Epoche 9 wird nach drei Epochen ohne Verbesserung abgebrochen.
+
+```powershell
+& .\.venv-gpu\Scripts\python.exe gpu/epoch_experiment.py `
+  --run-dir runtime/training/abgeschlossener-lauf `
+  --output-dir runtime/training/epoch-study `
+  --base-model runtime/models/multilingual --seed 42
+```
+
+Der Quelllauf muss bereits `evaluation.json` enthalten. Der Experimentordner enthält Kopien und Prüfsummen der Datensätze, `experiment-state.json` mit Prozessstatus, `history.json` mit Epochenmetriken und Laufzeiten sowie `comparison.json` und `summary.json`. Er wird nur einmal verwendet, auch bei einem Fehler; ein wiederholter Aufruf startet kein zweites Training. Die gemeinsame Trainingssperre verhindert einen gleichzeitigen Desktop-Trainingslauf. Das aktive Modell und laufende Dienste werden nicht verändert.
+
+Die zusätzlichen Trainingsoptionen `--seed`, `--history`, `--compare-epoch`, `--patience` und `--min-epochs` sind optional. Der normale Desktop-Starter bleibt bei acht Epochen. Ein solcher Versuch bewertet die vorhandenen Validierungsdaten; die Entscheidung sollte später an weiteren, bislang ungenutzten Mails überprüft werden.

@@ -7,10 +7,13 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+from types import ModuleType, SimpleNamespace
 import unittest
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).parent))
-from train_laya import load_dataset, load_samples, validate_sample, build_sample_items, evaluate
+from train_laya import (load_dataset, load_samples, validate_sample, build_sample_items, evaluate,
+                       parse_args, record_epoch, save_checkpoint, set_seed, write_history)
 
 
 HAS_LAYA_COMMON = importlib.util.find_spec("laya") is not None
@@ -261,6 +264,101 @@ class TrainingPipelineCheck(unittest.TestCase):
             evaluate(FixedLogits(), batches, "cpu")
         with self.assertRaisesRegex(ValueError, "no usable batches"):
             evaluate(FixedLogits(), [], "cpu")
+
+    def test_epoch_comparison_keeps_later_best_even_when_earlier_is_better(self):
+        history = {"epochs": [], "compare_epoch": 8, "patience": 3,
+                   "min_epochs": 9, "requested_epochs": 20}
+        decisions = []
+        for epoch, loss in enumerate([1., .8, .7, .6, .5, .4, .3, .2, .4, .35, .36], 1):
+            decisions.append(record_epoch(history, {"epoch": epoch, "val_loss": loss}))
+            if epoch < 11:
+                self.assertFalse(history["stopped_early"])
+        self.assertEqual(history["completed_epochs"], 11)
+        self.assertTrue(history["stopped_early"])
+        self.assertEqual(history["best_epoch"], 8)
+        self.assertEqual(history["best_through_epoch"], 8)
+        self.assertEqual(history["best_after_epoch"], 10)
+        self.assertEqual([i + 1 for i, decision in enumerate(decisions) if decision[1]], [8])
+        self.assertEqual([i + 1 for i, decision in enumerate(decisions) if decision[2]], [9, 10])
+
+    def test_early_stop_respects_minimum_ties_and_disabled_default(self):
+        history = {"epochs": [], "compare_epoch": 8, "patience": 3,
+                   "min_epochs": 9, "requested_epochs": 20}
+        for epoch in range(1, 10):
+            decision = record_epoch(history, {"epoch": epoch, "val_loss": 1.0})
+            self.assertEqual(history["stopped_early"], epoch == 9)
+        self.assertEqual(history["best_epoch"], 1)
+        self.assertEqual(history["best_through_epoch"], 1)
+        self.assertEqual(history["best_after_epoch"], 9)
+        self.assertEqual(decision, (False, False, True))
+
+        for validation_loss in (None, 1.0):
+            history = {"epochs": [], "compare_epoch": 0, "patience": 0,
+                       "min_epochs": 1, "requested_epochs": 5}
+            for epoch in range(1, 6):
+                record_epoch(history, {"epoch": epoch, "val_loss": validation_loss})
+                self.assertFalse(history["stopped_early"])
+            self.assertEqual(history["best_epoch"], 5 if validation_loss is None else 1)
+            self.assertIsNone(history["best_through_epoch"])
+            self.assertIsNone(history["best_after_epoch"])
+
+    def test_history_replacement_is_atomic_and_keeps_previous_file_on_error(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "history.json"
+            write_history(path, {"completed_epochs": 1, "epochs": [{"epoch": 1, "val_loss": .5}]})
+            previous = path.read_bytes()
+            with patch("train_laya.os.replace", side_effect=OSError("synthetic replacement failure")):
+                with self.assertRaises(OSError):
+                    write_history(path, {"completed_epochs": 2, "epochs": []})
+            self.assertEqual(path.read_bytes(), previous)
+            self.assertEqual([item.name for item in Path(folder).iterdir()], ["history.json"])
+            with self.assertRaises(ValueError):
+                write_history(path, {"val_loss": float("nan")})
+            self.assertEqual(path.read_bytes(), previous)
+            write_history(path, {"completed_epochs": 2, "epochs": [{"epoch": 2, "val_loss": .4}]})
+            self.assertEqual(json.loads(path.read_text())["completed_epochs"], 2)
+
+    def test_checkpoint_is_complete_and_records_selected_and_completed_epochs(self):
+        fake_safetensors = ModuleType("safetensors")
+        fake_torch = ModuleType("safetensors.torch")
+        fake_torch.save_file = lambda weights, path: Path(path).write_text(str(weights["synthetic_epoch"]))
+        with tempfile.TemporaryDirectory() as folder:
+            base = Path(folder) / "base"
+            for name in ("encoder", "tokenizer"):
+                (base / name).mkdir(parents=True)
+                (base / name / "config.json").write_text('{"synthetic": true}')
+            args = SimpleNamespace(base_model=base, epochs=20, seed=42)
+            config = {"head_layers": 2, "training": {"old": True}}
+            with patch.dict(sys.modules, {"safetensors": fake_safetensors, "safetensors.torch": fake_torch}):
+                for name, selected, completed in (("best-through-8", 3, 8), ("best-after-8", 10, 10), ("overall", 3, 11)):
+                    destination = Path(folder) / name
+                    save_checkpoint(destination, {"synthetic_epoch": selected}, config, args, completed, selected)
+                    saved = json.loads((destination / "rl_agent_config.json").read_text())
+                    self.assertEqual(saved["training"]["best_epoch"], selected)
+                    self.assertEqual(saved["training"]["epochs_completed"], completed)
+                    self.assertEqual(saved["training"]["epochs_requested"], 20)
+                    self.assertEqual(saved["training"]["seed"], 42)
+                    self.assertEqual((destination / "model.safetensors").read_text(), str(selected))
+                    for name in ("encoder", "tokenizer"):
+                        self.assertEqual((destination / name / "config.json").read_bytes(), (base / name / "config.json").read_bytes())
+            self.assertEqual(config["training"], {"old": True})
+
+    def test_optional_arguments_preserve_defaults_and_seed_all_rngs(self):
+        with patch.object(sys, "argv", ["train_laya.py", "--data", "synthetic.jsonl"]):
+            args = parse_args()
+        self.assertIsNone(args.seed)
+        self.assertIsNone(args.history)
+        self.assertEqual((args.patience, args.min_epochs, args.compare_epoch), (0, 1, 0))
+        fake_numpy, fake_torch = ModuleType("numpy"), ModuleType("torch")
+        fake_numpy.random = SimpleNamespace(seed=Mock())
+        fake_torch.manual_seed = Mock()
+        fake_torch.cuda = SimpleNamespace(manual_seed_all=Mock())
+        with patch.dict(sys.modules, {"numpy": fake_numpy, "torch": fake_torch}), patch("train_laya.random.seed") as python_seed:
+            set_seed(42)
+            python_seed.assert_called_once_with(42)
+            fake_numpy.random.seed.assert_called_once_with(42)
+            fake_torch.manual_seed.assert_called_once_with(42)
+            fake_torch.cuda.manual_seed_all.assert_called_once_with(42)
 
 
 if __name__ == "__main__":

@@ -44,7 +44,7 @@ def run_eval(agent, samples):
     validate_eval_samples(samples)
     correct = defaultdict(int)
     totals = defaultdict(int)
-    confusion_inhalt = defaultdict(lambda: defaultdict(int))
+    confusion = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
     latencies = []
 
     for index, item in enumerate(samples, 1):
@@ -72,17 +72,19 @@ def run_eval(agent, samples):
                 correct[qid] += 1
             totals[qid] += 1
 
-            if qid == "inhalt":
-                confusion_inhalt[gold_choice][pred_choice] += 1
+            confusion[qid][gold_choice][pred_choice] += 1
 
     accuracies = {qid: correct[qid] / totals[qid] for qid in totals}
     overall_acc = sum(correct.values()) / sum(totals.values())
     avg_latency = (sum(latencies) / len(latencies)) * 1000.0
+    confusion_by_question = {qid: {actual: dict(predicted) for actual, predicted in rows.items()}
+                             for qid, rows in confusion.items()}
 
     return {
         "accuracies": accuracies,
         "overall_accuracy": overall_acc,
-        "confusion_inhalt": {actual: dict(predicted) for actual, predicted in confusion_inhalt.items()},
+        "confusion_inhalt": confusion_by_question.get("inhalt", {}),
+        "confusion_by_question": confusion_by_question,
         "avg_latency_ms": avg_latency,
         "sample_count": len(samples),
         "question_totals": dict(totals),
