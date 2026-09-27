@@ -100,6 +100,14 @@ Das Entfernen eines Kontos aus der Übersicht löscht dessen private Anmeldedate
 2. Auf dem Server die Zuordnung in `accounts.json` prüfen. Verweist noch ein Konto auf diese Datei, das vorhandene Konto verwenden und die Datei an ihrem Platz lassen. Neue Imports speichern unter `token_<erste 16 SHA256-Hexzeichen der kleingeschriebenen, außen getrimmten Adresse>.json`; die Windows-Ausgabedatei hat zusätzlich einen zufälligen Suffix. Bei unklarer Zuordnung die Einrichtung hier anhalten.
 3. Nur wenn die eindeutig zugeordnete Datei von keinem Kontoeintrag mehr verwendet wird und das Konto neu verbunden werden soll: die einzelne verwaiste Datei in ein neu angelegtes privates Sicherungsverzeichnis verschieben, mit Verzeichnisrechten `0700` und Dateirechten `0600` unter Ubuntu. Kein vorhandenes Sicherungsziel überschreiben und keine anderen Tokendateien verschieben. Danach die geführte Einrichtung mit einer neu erzeugten Google-Freigabe wiederholen. Die alte Datei bis zur erfolgreichen Verbindung als private Sicherung behalten.
 
+## Gmail-Spam als zusätzliche Trainingsquelle
+
+In der Trainingsübersicht lädt **Spam-Beispiele laden** bis zu 100 weitere Nachrichten aus den Spam-Ordnern der ausgewählten aktiven Konten. Sie erhalten automatisch ausschließlich das Trainingsziel `Spamverdacht = ja`, mit Herkunft `gmail_spam`. Inhalt und Wichtigkeit werden nicht vorgegeben. Der Import liest nur Nachrichten; er verwendet kein Modell und verändert keine Gmail-Labels. Die Beispiele erscheinen nicht in der Prüfliste und fließen erst beim nächsten selbst gestarteten Training ein.
+
+Automatische Beispiele liegen getrennt in der privaten Datei `spam-training.json`. Bereits importierte Nachrichten und identische Texte werden nicht erneut exportiert. Persönliche Bewertungen einschließlich übersprungener Nachrichten haben Vorrang. Automatische Beispiele werden ausschließlich dem Trainingssatz zugeordnet; Validierung und Modellvergleich akzeptieren sie nicht als geprüfte Antworten. Der Export enthält deshalb die bisherige 80/20-Aufteilung menschlicher Bewertungen plus zusätzliche Spam-Beispiele nur im Trainingssatz.
+
+Googles Spam-Zuordnung ist ein automatisches Lernsignal, kein Fehlerfreiheitsnachweis. Sie kann auch unerwünschte Werbung enthalten, während Layas Frage nach Spamverdacht besonders auf konkrete Täuschungsmerkmale zielt. Veränderungen deshalb anhand menschlich bewerteter Mails prüfen; ohne geprüfte Spam-Beispiele im Test lässt sich keine Spam-Trefferquote belegen.
+
 ## GPU auf einem zweiten Rechner
 
 Die [GPU-Anleitung](gpu/README.md) beschreibt die Windows-Einrichtung. Beispieladressen in diesem Repository sind Platzhalter und müssen zur eigenen Umgebung passen.

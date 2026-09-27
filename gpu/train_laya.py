@@ -59,7 +59,7 @@ def parse_args():
     return parser.parse_args()
 
 
-def validate_sample(sample, location="sample"):
+def validate_sample(sample, location="sample", *, allow_gmail_spam=False):
     """Validate an exported target distribution without echoing email contents."""
     def invalid(reason):
         raise ValueError(f"{location}: {reason}") from None
@@ -79,6 +79,14 @@ def validate_sample(sample, location="sample"):
     metadata = sample.get("metadata", {})
     if not isinstance(metadata, dict) or metadata.get("split") not in (None, "train", "val"):
         invalid("metadata.split must be train or val when supplied")
+    gmail_spam = metadata.get("label_source") == "gmail_spam"
+    if gmail_spam:
+        if not allow_gmail_spam:
+            invalid("Gmail spam labels are training-only and cannot be used for evaluation")
+        if metadata.get("split") != "train":
+            invalid("Gmail spam labels require metadata.split=train")
+        if set(questions) != {"spamverdacht"}:
+            invalid("Gmail spam labels must contain only the spamverdacht question")
     for qid, question in questions.items():
         if not isinstance(qid, str) or not qid.strip() or not isinstance(question, dict):
             invalid("question IDs must be nonempty strings with object definitions")
@@ -116,9 +124,12 @@ def validate_sample(sample, location="sample"):
         if (any(type(value) not in (int, float) or not 0 <= value <= 1 for value in values)
                 or not math.isclose(sum(values), 1.0, rel_tol=1e-6, abs_tol=1e-6)):
             invalid("gold probabilities must be finite, nonnegative numbers summing to one")
+    if gmail_spam and (questions["spamverdacht"]["type"] != "choice"
+                      or gold["spamverdacht"]["probabilities"] != {"ja": 1.0, "nein": 0.0}):
+        invalid("Gmail spam labels require a positive ja/nein choice target")
 
 
-def load_samples(file_path):
+def load_samples(file_path, *, allow_gmail_spam=False):
     """Read nonempty UTF-8 JSONL; invalid rows raise a content-free line error."""
     file_path = Path(file_path)
     samples = []
@@ -134,7 +145,7 @@ def load_samples(file_path):
             sample = json.loads(line)
         except (ValueError, RecursionError):
             raise ValueError(f"{location}: invalid JSON") from None
-        validate_sample(sample, location)
+        validate_sample(sample, location, allow_gmail_spam=allow_gmail_spam)
         samples.append(sample)
     if not samples:
         raise ValueError(f"{file_path}: dataset is empty; collect and export reviews first")
@@ -142,7 +153,7 @@ def load_samples(file_path):
 
 
 def load_dataset(file_path, val_ratio=0.20, val_file_path=None):
-    samples = load_samples(file_path)
+    samples = load_samples(file_path, allow_gmail_spam=True)
     if val_file_path:
         train_samples, val_samples = samples, load_samples(val_file_path)
         if any(item.get("metadata", {}).get("split") == "val" for item in train_samples):
@@ -168,7 +179,7 @@ def load_dataset(file_path, val_ratio=0.20, val_file_path=None):
 def build_sample_items(tok, sample, max_len=1024, head_max_len=256):
     from laya.common import QTYPES, build_sequence
 
-    validate_sample(sample)
+    validate_sample(sample, allow_gmail_spam=True)
 
     state = sample["state"]
     questions = sample["questions"]

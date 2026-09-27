@@ -33,6 +33,7 @@ button, a, input, select, summary { -webkit-tap-highlight-color: transparent; }
 button, input, select { border-radius: 8px; }
 button, a { transition: background-color 180ms ease-out, border-color 180ms ease-out, color 180ms ease-out; }
 button:disabled, input:disabled, select:disabled { cursor: not-allowed; opacity: .48; }
+.account-add[aria-disabled="true"] { cursor: not-allowed; opacity: .48; }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }
 ::selection { color: var(--ink); background: #51436e; }
 input { caret-color: var(--accent); }
@@ -222,6 +223,16 @@ kbd { font: inherit; font-size: .875rem; border: 1px solid var(--line); border-b
 .export-splits { display: flex; justify-content: center; gap: 19px; }
 .export-sublink { padding: 5px 0; }
 .training-note { font-size: .875rem; line-height: 1.7; color: var(--muted); padding-top: 19px; margin: 15px 0 0; border-top: 1px solid var(--line); }
+.spam-training { margin-top: 24px; padding-top: 22px; border-top: 1px solid var(--line); }
+.spam-training h3 { font-size: 1rem; margin-bottom: 6px; }
+.spam-training-description { font-size: .875rem; color: var(--muted); margin: 14px 0 0; line-height: 1.65; }
+.spam-training-count { display: block; margin-top: 16px; font-size: .875rem; font-weight: 600; font-variant-numeric: tabular-nums; }
+.spam-training-actions { display: flex; flex-direction: column; gap: 9px; margin-top: 15px; }
+.spam-training-actions .count-control { justify-content: space-between; margin: 0; }
+.spam-training-actions .count-help { margin: 0; }
+.spam-training-status { font-size: .875rem; color: var(--success); margin: 14px 0 0; overflow-wrap: anywhere; }
+.spam-training-status.has-error { color: var(--danger); }
+.spam-training-errors { color: var(--danger); font-size: .875rem; padding-left: 20px; margin: 14px 0 0; overflow-wrap: anywhere; }
 mark { padding: 1px 3px; border-radius: 3px; }
 mark.hl-invoice { color: #efd3a1; background: #49402d; }
 mark.hl-urgent { color: #f4c1c6; background: #51323c; }
@@ -240,7 +251,6 @@ footer > span { display: flex; align-items: center; gap: 8px; }
 footer p { margin: 0; max-width: 61ch; text-align: right; }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
 @keyframes soft-pulse { 50% { opacity: .35; } }
-@media (min-width: 1200px) { .review-sidebar { position: sticky; top: 24px; } }
 @media (max-width: 1200px) {
   .header-inner, main { padding-left: 28px; padding-right: 28px; }
   .header-actions { gap: 14px; flex-wrap: wrap; }

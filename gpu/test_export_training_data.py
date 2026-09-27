@@ -23,6 +23,24 @@ def payload(*samples):
 
 
 class ExportCheck(unittest.TestCase):
+    def test_gmail_spam_provenance_is_preserved_in_training_and_never_validation(self):
+        weak = {"state": "Synthetic Gmail spam",
+                "questions": {"spamverdacht": {"type": "choice", "instructions": "Spam?",
+                                                "criteria": {"ja": "Spam", "nein": "Kein Spam"}}},
+                "gold": {"spamverdacht": {"type": "choice", "probabilities": {"ja": 1.0, "nein": 0.0}}},
+                "metadata": {"label_source": "gmail_spam", "split": "train"}}
+        human_val = sample("Synthetic human-reviewed validation", "val")
+        with tempfile.TemporaryDirectory() as folder:
+            output = Path(folder) / "new-run"
+            self.assertEqual(save_export(payload(weak, human_val), output), (1, 1))
+            self.assertEqual(json.loads((output / "laya-mail-train.jsonl").read_text()), weak)
+            self.assertEqual(json.loads((output / "laya-mail-val.jsonl").read_text()), human_val)
+            weak["metadata"]["split"] = "val"
+            invalid_output = Path(folder) / "invalid-run"
+            with self.assertRaisesRegex(ValueError, "metadata.split=train"):
+                save_export(payload(sample("Synthetic human training", "train"), weak), invalid_output)
+            self.assertFalse(invalid_output.exists())
+
     def test_one_snapshot_is_split_without_changing_review_data(self):
         train = sample("Synthetic train message", "train")
         val = sample("Synthetic validation message", "val")

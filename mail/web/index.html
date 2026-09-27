@@ -19,7 +19,7 @@
           <svg class="account-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m7 10 5 5 5-5"/></svg>
           <select id="account-select" class="account-select" aria-label="E-Mail-Konto auswählen" title="Aktives Postfach auswählen"><option value="all">Alle Postfächer (kombiniert)</option></select>
         </div>
-        <a class="account-add" href="/accounts/new"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>Konto hinzufügen</a>
+        <a id="account-add" class="account-add" href="/accounts/new"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>Konto hinzufügen</a>
         <button id="logout" class="text-button" type="button">Abmelden</button>
       </div>
     </div>
@@ -79,7 +79,22 @@
           <div class="review-progress"><div><strong id="review-progress-text">0 von 0 bewertet</strong><span id="review-progress-detail">0 übersprungen · 0 unbewertet</span></div><strong id="training-count">0 Trainingsbeispiele</strong></div>
           <progress id="review-progress" max="1" value="0" aria-label="Fortschritt deiner Bewertungen"></progress>
           <div id="category-distribution" class="category-distribution" hidden></div>
-          <div class="export-actions"><a id="training-export" class="secondary-button export-link" href="/api/training-export" download hidden>Trainingsdaten herunterladen</a><div class="export-splits"><a id="training-export-train" class="text-button export-sublink" href="/api/training-export?split=train" download hidden>Train (80%)</a><a id="training-export-val" class="text-button export-sublink" href="/api/training-export?split=val" download hidden>Val (20%)</a></div></div>
+          <section class="spam-training" aria-labelledby="spam-training-heading">
+            <h3 id="spam-training-heading">Spam automatisch übernehmen</h3>
+            <p class="muted">Von Gmail als Spam erkannt · nur Training</p>
+            <p class="spam-training-description">Lädt Spam aus den oben ausgewählten Postfächern als Lernbeispiele. Keine Einzelbewertung nötig.</p>
+            <strong id="spam-training-count" class="spam-training-count">0 automatische Spam-Beispiele</strong>
+            <div class="spam-training-actions">
+              <label class="count-control" for="spam-training-limit"><span>Anzahl Spam-Mails</span><input id="spam-training-limit" type="number" min="1" max="100" step="1" value="20" inputmode="numeric" required aria-describedby="spam-training-help" disabled></label>
+              <span id="spam-training-help" class="count-help">1–100 pro Import</span>
+              <button id="spam-training-load" class="secondary-button" type="button" disabled>Spam zum Lernen laden</button>
+            </div>
+            <p id="spam-training-status" class="spam-training-status" role="status" aria-live="polite" hidden></p>
+            <progress id="spam-training-progress" max="1" value="0" aria-label="Fortschritt des Spam-Imports" hidden></progress>
+            <ul id="spam-training-errors" class="spam-training-errors" role="alert" hidden></ul>
+            <p class="spam-training-description">Gmail bleibt unverändert. Die Beispiele erhalten das Lernziel „Spam = ja“; Inhalt und Wichtigkeit bleiben unbewertet. Googles Zuordnung ist keine geprüfte Testgrundlage.</p>
+          </section>
+          <div class="export-actions"><a id="training-export" class="secondary-button export-link" href="/api/training-export" download hidden>Trainingsdaten herunterladen</a><div class="export-splits"><a id="training-export-train" class="text-button export-sublink" href="/api/training-export?split=train" download hidden>Trainingssatz</a><a id="training-export-val" class="text-button export-sublink" href="/api/training-export?split=val" download hidden>Validierung</a></div><p id="training-split-note" class="muted" hidden>Deine Bewertungen: 80 % Training, 20 % Validierung. Automatische Spam-Beispiele: nur Training.</p></div>
           <p class="training-note">Bewertungen ändern keine Gmail-Labels. Das Modell lernt erst durch einen späteren Trainingslauf. Der Export enthält die ausgewerteten Mailtexte.</p>
         </section>
       </aside>

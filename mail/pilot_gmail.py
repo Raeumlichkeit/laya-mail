@@ -197,7 +197,10 @@ def gmail_get(session, path, **params):
         raise PilotError("gmail_request_failed") from None
     if response.status_code != 200:
         raise PilotError(error_code(response))
-    data = response.json()
+    try:
+        data = response.json()
+    except (TypeError, ValueError):
+        raise PilotError("gmail_response_invalid") from None
     if not isinstance(data, dict):
         raise PilotError("gmail_response_invalid")
     return data
@@ -207,13 +210,16 @@ def valid_message_id(value):
     return isinstance(value, str) and re.fullmatch(r"[0-9a-fA-F]+", value) is not None
 
 
-def next_entries(session, exclude_ids, limit=LIMIT, should_stop=None):
+def next_entries(session, exclude_ids, limit=LIMIT, should_stop=None, *, label_id="INBOX"):
+    if label_id not in {"INBOX", "SPAM"}:
+        raise PilotError("gmail_label_invalid")
     if not isinstance(exclude_ids, (set, frozenset)) or not all(valid_message_id(value) for value in exclude_ids):
         raise PilotError("exclude_ids_invalid")
     seen_ids = {value.lower() for value in exclude_ids}
     seen_tokens = set()
     selected = []
-    params = {"labelIds": "INBOX", "maxResults": 100, "includeSpamTrash": "false"}
+    params = {"labelIds": label_id, "maxResults": 100,
+              "includeSpamTrash": "true" if label_id == "SPAM" else "false"}
     pages = 0
     while limit is None or pages < 100:
         if should_stop is not None and should_stop():
@@ -298,6 +304,32 @@ def matching_review(row, reviews):
 def request_payload(state):
     state, truncated = shorten_middle(state, STATE_CHARS)
     return {"model": "multilingual", "state": state, "questions": deepcopy(QUESTIONS)}, truncated
+
+
+def prepare_message(message):
+    """Build the shared private model input; never fetch attachments or infer labels."""
+    headers = {h["name"].lower(): h["value"] for h in message["payload"].get("headers", [])}
+    subject = clean(str(make_header(decode_header(headers.get("subject", "")))))
+    sender = clean(str(make_header(decode_header(headers.get("from", "")))))
+    text, attachments, source, omitted, capped = mail_text(message)
+    attachment_names = [name[:200] for name in attachments[:50]]
+    clean_text = strip_boilerplate(text)
+    boilerplate_trimmed = clean_text != text
+    body, body_trimmed = shorten_middle(clean_text, BODY_CHARS)
+    state = f"Absender: {sender[:200]}\nBetreff: {subject[:300]}\nAnhangnamen (Inhalt nicht gelesen): {', '.join(attachment_names)[:300]}\nE-Mail-Text: {body}"
+    trimmed = (capped or body_trimmed or boilerplate_trimmed
+               or len(subject) > 300 or len(sender) > 200
+               or len(', '.join(attachments)) > 300 or len(attachments) > 50
+               or any(len(name) > 200 for name in attachments))
+    if trimmed:
+        state += "\n[Text oder Metadaten gekuerzt]"
+    payload, request_trimmed = request_payload(state)
+    return {
+        "subject": subject[:300], "sender": sender[:200], "excerpt": text[:240],
+        "attachment_names": attachment_names, "body_source": source,
+        "content_omitted": omitted, "truncated": trimmed or request_trimmed,
+        "model_input": payload,
+    }
 
 
 def classify(session, url, key, payload):
@@ -398,29 +430,8 @@ def run_pilot(gmail_session, laya_session, expected_account, laya_url, key, prog
             row["message_id"] = message_id
             row["account_email"] = expected_account.casefold()
             message = gmail_get(gmail_session, "/messages/" + message_id, format="full")
-            headers = {h["name"].lower(): h["value"] for h in message["payload"].get("headers", [])}
-            subject = clean(str(make_header(decode_header(headers.get("subject", "")))))
-            sender = clean(str(make_header(decode_header(headers.get("from", "")))))
-            text, attachments, source, omitted, capped = mail_text(message)
-            attachment_names = [name[:200] for name in attachments[:50]]
-            clean_text = strip_boilerplate(text)
-            boilerplate_trimmed = clean_text != text
-            body, body_trimmed = shorten_middle(clean_text, BODY_CHARS)
-            state = f"Absender: {sender[:200]}\nBetreff: {subject[:300]}\nAnhangnamen (Inhalt nicht gelesen): {', '.join(attachment_names)[:300]}\nE-Mail-Text: {body}"
-            trimmed = (capped or body_trimmed or boilerplate_trimmed
-                       or len(subject) > 300 or len(sender) > 200
-                       or len(', '.join(attachments)) > 300 or len(attachments) > 50
-                       or any(len(name) > 200 for name in attachments))
-            if trimmed:
-                state += "\n[Text oder Metadaten gekuerzt]"
-            row.update({
-                "subject": subject[:300], "sender": sender[:200], "excerpt": text[:240],
-                "attachment_names": attachment_names, "body_source": source,
-                "content_omitted": omitted, "truncated": trimmed,
-            })
-            payload, request_trimmed = request_payload(state)
-            row["truncated"] = trimmed or request_trimmed
-            row["model_input"] = payload
+            row.update(prepare_message(message))
+            payload = row["model_input"]
             scores, tokens = classify(laya_session, laya_url, key, payload)
             suggestions = {name: value["choice"] for name, value in scores.items()}
             row.update({"status": "suggestion", "suggestions": suggestions,

@@ -14,6 +14,7 @@ class Node {
   append(...nodes) { for (const node of nodes) { node.parentElement = this; this.children.push(node); } }
   replaceChildren(...nodes) { this.children.forEach((node) => { node.parentElement = null; }); this.children = []; this.append(...nodes); }
   setAttribute(key, value) { this.attributes[key] = value; }
+  getAttribute(key) { return this.attributes[key] ?? null; }
   removeAttribute(key) { delete this.attributes[key]; }
   addEventListener(key, handler) { this.handlers[key] = handler; }
   focus() { context.document.activeElement = this; }
@@ -45,6 +46,7 @@ const get = (id) => {
   return nodes.get(id);
 };
 get('mail-limit').value = '20';
+get('spam-training-limit').value = '20';
 const filters = ['all', 'unreviewed', 'uncertain', 'review', 'rechnung', 'werbung', 'wichtig', 'spam'].map((value) => {
   const node = new Node('button'); node.dataset.filter = value; return node;
 });
@@ -60,6 +62,8 @@ let reportReads = 0;
 let failSave = false;
 let lastPayload;
 let runPayloads = [];
+let spamPayloads = [];
+let failSpam = false;
 let stopCalls = 0;
 let serverStatus = {
   phase: 'complete', finished_at: base.created_utc, batch_mode: 'latest',
@@ -102,6 +106,15 @@ const context = {
       const payload = JSON.parse(options.body);
       runPayloads.push(payload);
       serverStatus = { phase: 'running', finished_at: null, processed: 0, total: payload.limit ?? null, requested_limit: payload.limit ?? null, batch_mode: payload.mode, settings: { live_mode: false, sort_inbox: false } };
+      data = { status: 'started' };
+    } else if (url === '/api/spam-training') {
+      for (const id of ['run', 'run-next', 'run-all', 'run-rescan', 'mail-limit', 'account-select', 'toggle-live-mode', 'toggle-sort-inbox', 'spam-training-load', 'spam-training-limit']) {
+        assert.equal(get(id).disabled, true, `${id} must be locked while the import request is pending`);
+      }
+      const payload = JSON.parse(options.body);
+      spamPayloads.push(payload);
+      if (failSpam) return { status: 409, ok: false, json: async () => ({ error: 'Bitte den laufenden Vorgang abwarten.' }) };
+      serverStatus.spam_training = { phase: 'running', processed: 0, total: null, added: 0, available: 0, errors: [] };
       data = { status: 'started' };
     } else if (url === '/api/run/stop') {
       assert.deepEqual(JSON.parse(options.body), {});
@@ -288,7 +301,7 @@ async function press(key, target = new Node('body'), options = {}) {
   serverStatus = { phase: 'complete', finished_at: serverReport.created_utc, batch_mode: 'next' };
   await context.refreshStatus();
   assert.equal(get('empty-heading').textContent, 'Keine weiteren Mails im Posteingang');
-  assert.equal(get('training-count').textContent, '1 Trainingsbeispiel insgesamt');
+  assert.equal(get('training-count').textContent, '1 Trainingsbeispiel von dir geprüft');
   assert.equal(get('run-next').disabled, false);
   assert.equal(get('mail-limit').disabled, false);
   assert.equal(get('message-limit-note').textContent, 'bis zu 12 je Durchlauf');
@@ -419,5 +432,63 @@ async function press(key, target = new Node('body'), options = {}) {
   await context.refreshStatus();
   assert.equal(get('status-heading').textContent, 'Mails gelabelt');
   assert.match(get('status-description').textContent, /^12 Mails /);
-  console.log('PASS: dashboard/keyboard/account regressions; all-mail start without limit; truthful progress; label/application locks; acknowledged stop and completion');
+
+  for (const invalid of ['', '0', '101', '2.5', 'abc']) {
+    get('spam-training-limit').value = invalid;
+    await get('spam-training-load').handlers.click();
+    assert.equal(spamPayloads.length, 0, 'Invalid import counts cannot reach the API');
+  }
+  assert.equal(get('spam-training-limit').validityReported, true);
+  get('spam-training-limit').value = '50';
+  const reviewList = JSON.stringify(serverReport.messages);
+  const mailRuns = runPayloads.length;
+  const lastControl = controlPayload;
+  await get('spam-training-load').handlers.click();
+  assert.deepEqual(spamPayloads, [{ limit: 50 }], 'One click starts only the training import');
+  assert.equal(get('spam-training-load').textContent, 'Spam wird übernommen …');
+  assert.equal(get('spam-training-status').textContent, 'Spam-Mails werden gesucht …');
+  assert.equal(get('spam-training-progress').hidden, false);
+  assert.equal(Object.hasOwn(get('spam-training-progress').attributes, 'value'), false);
+  await get('spam-training-load').handlers.click();
+  await get('run-all').handlers.click();
+  await get('account-select').handlers.change({ target: get('account-select') });
+  await get('toggle-live-mode').handlers.change({ target: get('toggle-live-mode') });
+  const accountEvent = { prevented: false, preventDefault() { this.prevented = true; } };
+  get('account-add').handlers.click(accountEvent);
+  assert.equal(accountEvent.prevented, true, 'Account onboarding is locked during import');
+  assert.equal(spamPayloads.length, 1, 'Running imports cannot be duplicated');
+  assert.equal(runPayloads.length, mailRuns, 'Mail runs cannot overlap an import');
+  assert.equal(controlPayload, lastControl, 'Account/settings requests cannot overlap an import');
+  serverStatus.spam_training = { phase: 'running', processed: 7, total: 12, added: 5, available: 5, errors: [] };
+  await context.refreshStatus();
+  assert.equal(get('spam-training-progress').value, 7);
+  assert.equal(get('spam-training-progress').max, 12);
+  assert.equal(get('spam-training-limit').value, '50', 'Polling retains the import count');
+  assert.equal(get('spam-training-count').textContent, '5 automatische Spam-Beispiele');
+  serverStatus.spam_training = { phase: 'complete', processed: 12, total: 12, added: 10, available: 10, errors: [], finished_at: '2026-09-27T11:00:00Z' };
+  const readsBeforeImportFinished = reportReads;
+  await context.refreshStatus();
+  assert.ok(reportReads > readsBeforeImportFinished, 'Completion refreshes export counts without a changed mail report');
+  assert.equal(get('spam-training-progress').hidden, true);
+  assert.equal(get('spam-training-load').disabled, false);
+  assert.equal(get('run-all').disabled, false);
+  assert.equal(get('account-select').disabled, false);
+  assert.equal(get('spam-training-status').textContent, '10 neue Spam-Beispiele übernommen. Bereit für den nächsten Trainingslauf.');
+  assert.equal(JSON.stringify(serverReport.messages), reviewList, 'Imported spam does not enter or change the review list');
+  context.renderReport({ messages: [], summary: { training_examples: 0, spam_training_examples: 10 } });
+  assert.equal(get('training-count').textContent, '0 Trainingsbeispiele von dir geprüft');
+  assert.equal(get('training-export').hidden, false, 'Machine-only datasets can be exported');
+  assert.equal(get('training-export-train').hidden, false);
+  assert.equal(get('training-export-val').hidden, true, 'Machine-only examples cannot imply validation examples');
+  serverStatus.spam_training = { phase: 'error', processed: 2, total: 12, added: 1, available: 11, errors: [hostile], finished_at: '2026-09-27T11:01:00Z' };
+  await context.refreshStatus();
+  assert.equal(get('spam-training-errors').children[0].textContent, hostile, 'Import errors are literal text, never markup');
+  assert.equal(get('spam-training-count').textContent, '11 automatische Spam-Beispiele');
+  assert.match(get('spam-training-status').textContent, /nicht vollständig/);
+  assert.equal(get('spam-training-load').disabled, false, 'A finished failed import can be retried');
+  failSpam = true;
+  await get('spam-training-load').handlers.click();
+  assert.match(get('spam-training-errors').children[0].textContent, /Bitte den laufenden Vorgang abwarten/);
+  assert.equal(get('spam-training-load').disabled, false, 'A rejected start releases its local lock');
+  console.log('PASS: dashboard/keyboard/account regressions; all-mail progress/locks; spam import validation, progress, locking, errors and separate training-only exports');
 })().catch((error) => { console.error(error); process.exitCode = 1; });

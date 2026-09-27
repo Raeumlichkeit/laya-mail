@@ -22,6 +22,7 @@ credentials*.json
 dashboard-key
 dashboard-access.txt
 feedback.json
+spam-training.json
 accounts.json
 .accounts-tmp.json
 account-setup.json

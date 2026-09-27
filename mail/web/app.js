@@ -17,6 +17,8 @@ let errorSource = null;
 let selectedMailKey = null;
 let stopping = false;
 let applyingCurrent = false;
+let startingSpam = false;
+let spamImportError = '';
 const contentLabels = { rechnung: 'Rechnung', info: 'Allgemeine Information', werbung: 'Werbung', sonstiges: 'Sonstiges' };
 const reviewLabels = { accepted: 'Bestätigt', corrected: 'Korrigiert', skipped: 'Übersprungen' };
 const mailErrorMessages = {
@@ -123,7 +125,8 @@ function renderStatus() {
   const selectedText = validLimit ? `${selected} ` : '';
   const processed = Math.max(0, Number(status?.processed) || 0);
   const applying = applyingCurrent || Boolean(status?.applying_labels);
-  const locked = !status || running || Boolean(starting) || Boolean(editing) || saving || applying;
+  const importingSpam = startingSpam || status?.spam_training?.phase === 'running';
+  const locked = !status || running || Boolean(starting) || Boolean(editing) || saving || applying || importingSpam;
   const activeMode = starting || status?.batch_mode || 'latest';
   const allMode = activeMode === 'all';
   const activeLimit = startingLimit || status?.requested_limit || 20;
@@ -133,6 +136,12 @@ function renderStatus() {
   $('mail-limit').disabled = locked;
   $('run-all').disabled = locked;
   $('account-select').disabled = locked;
+  $('account-add').setAttribute('aria-disabled', String(locked));
+  $('account-add').tabIndex = locked ? -1 : 0;
+  $('toggle-live-mode').disabled = locked;
+  $('toggle-sort-inbox').disabled = locked;
+  $('spam-training-load').disabled = locked;
+  $('spam-training-limit').disabled = locked;
   $('focus-review').disabled = Boolean(editing) || saving || !reportLoaded;
   $('stop-run').hidden = !(running && status?.batch_mode === 'all');
   $('stop-run').disabled = stopping || Boolean(status?.stop_requested);
@@ -182,6 +191,38 @@ function renderStatus() {
     $('status-description').textContent = 'Wähle die Anzahl der Nachrichten für deine nächste lokale Auswertung.';
   }
   if (status?.settings) renderSettings(status.settings);
+  renderSpamTraining();
+}
+
+function renderSpamTraining() {
+  const imported = status?.spam_training || {};
+  const running = startingSpam || imported.phase === 'running';
+  const available = Math.max(0, Number(imported.available ?? report.summary.spam_training_examples) || 0);
+  const human = Math.max(0, Number(report.summary.training_examples) || 0);
+  const processed = Math.max(0, Number(imported.processed) || 0);
+  const total = Math.max(0, Number(imported.total) || 0);
+  const added = Math.max(0, Number(imported.added) || 0);
+  $('spam-training-count').textContent = `${available} automatische${available === 1 ? 's Spam-Beispiel' : ' Spam-Beispiele'}`;
+  $('spam-training-load').textContent = running ? 'Spam wird übernommen …' : 'Spam zum Lernen laden';
+  const progress = $('spam-training-progress');
+  progress.hidden = !running;
+  progress.max = Math.max(1, total);
+  if (running && !total) progress.removeAttribute('value');
+  else progress.value = Math.min(processed, total);
+  let note = '';
+  if (running) note = total ? `${processed} von ${total} Spam-Mails verarbeitet.` : 'Spam-Mails werden gesucht …';
+  else if (imported.phase === 'complete') note = added ? `${added} neue Spam-Beispiele übernommen. Bereit für den nächsten Trainingslauf.` : 'Keine neuen Spam-Beispiele gefunden.';
+  else if (imported.phase === 'error') note = `${added} neue Spam-Beispiele übernommen. Der Import konnte nicht vollständig abgeschlossen werden.`;
+  $('spam-training-status').textContent = note;
+  $('spam-training-status').hidden = !note;
+  $('spam-training-status').classList.toggle('has-error', imported.phase === 'error' && !running);
+  const errors = [spamImportError, ...(Array.isArray(imported.errors) ? imported.errors.filter((error) => typeof error === 'string') : [])].filter(Boolean);
+  $('spam-training-errors').replaceChildren(...errors.map((error) => element('li', '', error)));
+  $('spam-training-errors').hidden = !errors.length;
+  $('training-export').hidden = !(human || available);
+  $('training-export-train').hidden = !(human || available);
+  $('training-export-val').hidden = !human;
+  $('training-split-note').hidden = !(human || available);
 }
 
 function label(text, kind) {
@@ -458,12 +499,7 @@ function renderReport(data) {
   $('review-progress-detail').textContent = `${skipped} übersprungen · ${pending} unbewertet`;
   $('review-progress').max = Math.max(1, report.messages.length);
   $('review-progress').value = reviewed + skipped;
-  $('training-count').textContent = `${training} ${training === 1 ? 'Trainingsbeispiel' : 'Trainingsbeispiele'} insgesamt`;
-  $('training-export').hidden = !training;
-  const trainSplit = $('training-export-train');
-  const valSplit = $('training-export-val');
-  if (trainSplit) trainSplit.hidden = !training;
-  if (valSplit) valSplit.hidden = !training;
+  $('training-count').textContent = `${training} ${training === 1 ? 'Trainingsbeispiel' : 'Trainingsbeispiele'} von dir geprüft`;
 
   const dist = report.summary.distribution;
   const distEl = $('category-distribution');
@@ -481,9 +517,6 @@ function renderReport(data) {
   } else if (distEl) {
     distEl.hidden = true;
   }
-  $('review-progress').value = reviewed + skipped;
-  $('training-count').textContent = `${training} ${training === 1 ? 'Trainingsbeispiel' : 'Trainingsbeispiele'} insgesamt`;
-  $('training-export').hidden = !training;
   const date = dateParts(report.created_utc);
   $('report-date').textContent = date?.day || 'Noch keine';
   $('report-time').textContent = date ? `${date.time} · Ortszeit dieses Geräts` : 'Starte eine erste Prüfung';
@@ -592,7 +625,8 @@ async function refreshStatus() {
     const reportChanged = next.finished_at && next.finished_at !== status?.finished_at;
     const justFinished = status?.phase === 'running' && next.phase !== 'running';
     const feedbackChanged = next.feedback_revision !== status?.feedback_revision;
-    reportPending = reportPending || reportChanged || justFinished || feedbackChanged;
+    const spamFinished = next.spam_training?.finished_at && next.spam_training.finished_at !== status?.spam_training?.finished_at;
+    reportPending = reportPending || reportChanged || justFinished || feedbackChanged || spamFinished;
     status = next;
     renderStatus();
     if (next.gpu) renderGpu(next.gpu);
@@ -610,7 +644,7 @@ async function refreshStatus() {
   } catch (error) {
     if (!leaving) showError(`Der aktuelle Stand konnte nicht geladen werden. ${error.message}`, 'status');
   } finally {
-    if (!leaving) pollTimer = setTimeout(refreshStatus, status?.phase === 'running' ? 2000 : 15000);
+    if (!leaving) pollTimer = setTimeout(refreshStatus, status?.phase === 'running' || status?.spam_training?.phase === 'running' ? 2000 : 15000);
   }
 }
 
@@ -637,7 +671,7 @@ $('return-correction').addEventListener('click', () => {
   document.querySelector('.correction-form select')?.focus();
 });
 async function startRun(mode) {
-  if (starting || status?.phase === 'running' || editing || saving || applyingCurrent || status?.applying_labels) return;
+  if (!status || starting || status.phase === 'running' || editing || saving || applyingCurrent || status.applying_labels || startingSpam || status.spam_training?.phase === 'running') return;
   const input = $('mail-limit');
   const limit = mode === 'all' ? null : Number(input.value);
   if (mode !== 'all' && (!Number.isInteger(limit) || limit < 1 || limit > 100)) {
@@ -668,6 +702,31 @@ $('run-next').addEventListener('click', () => startRun('next'));
 $('run-rescan')?.addEventListener('click', () => startRun('rescan'));
 $('run-all').addEventListener('click', () => startRun('all'));
 $('mail-limit').addEventListener('input', renderStatus);
+$('spam-training-load').addEventListener('click', async () => {
+  if ($('spam-training-load').disabled) return;
+  const input = $('spam-training-limit');
+  const limit = Number(input.value);
+  if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
+    input.reportValidity();
+    return;
+  }
+  startingSpam = true;
+  spamImportError = '';
+  renderStatus();
+  try {
+    await api('/api/spam-training', 'POST', { limit });
+    status.spam_training = { phase: 'running', processed: 0, total: null, added: 0, available: status.spam_training?.available ?? report.summary.spam_training_examples ?? 0, errors: [] };
+    await refreshStatus();
+  } catch (error) {
+    if (!leaving) spamImportError = `Spam-Import konnte nicht gestartet werden. ${error.message}`;
+  } finally {
+    startingSpam = false;
+    renderStatus();
+  }
+});
+$('account-add').addEventListener('click', (event) => {
+  if ($('account-add').getAttribute('aria-disabled') === 'true') event.preventDefault();
+});
 $('stop-run').addEventListener('click', async () => {
   if (stopping || status?.phase !== 'running' || status?.batch_mode !== 'all' || status?.stop_requested) return;
   stopping = true;
@@ -718,6 +777,7 @@ $('btn-apply-current')?.addEventListener('click', async () => {
 });
 
 $('account-select')?.addEventListener('change', async (e) => {
+  if (e.target.disabled) return;
   try {
     const res = await api('/api/accounts/select', 'POST', { selected: e.target.value });
     renderAccounts(res);
@@ -728,6 +788,7 @@ $('account-select')?.addEventListener('change', async (e) => {
 });
 
 $('toggle-live-mode')?.addEventListener('change', async (e) => {
+  if (e.target.disabled) return;
   try {
     const res = await api('/api/settings', 'POST', { live_mode: e.target.checked });
     if (status) status.settings = res;
@@ -739,6 +800,7 @@ $('toggle-live-mode')?.addEventListener('change', async (e) => {
 });
 
 $('toggle-sort-inbox')?.addEventListener('change', async (e) => {
+  if (e.target.disabled) return;
   try {
     const res = await api('/api/settings', 'POST', { sort_inbox: e.target.checked });
     if (status) status.settings = res;

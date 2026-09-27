@@ -1,6 +1,7 @@
 """Offline tests for training and dataset processing helpers."""
 
 import importlib.util
+import copy
 import json
 import math
 from pathlib import Path
@@ -30,7 +31,61 @@ def sample(state="Synthetic training example", split="train"):
     }
 
 
+def gmail_spam_sample():
+    return {
+        "state": "Synthetic Gmail spam example",
+        "questions": {"spamverdacht": {"type": "choice", "instructions": "Spam?",
+                                        "criteria": {"ja": "Spam", "nein": "Kein Spam"}}},
+        "gold": {"spamverdacht": {"type": "choice", "probabilities": {"ja": 1.0, "nein": 0.0}}},
+        "metadata": {"split": "train", "label_source": "gmail_spam"},
+    }
+
+
 class TrainingPipelineCheck(unittest.TestCase):
+    def test_gmail_spam_labels_are_partial_positive_training_targets_only(self):
+        weak = gmail_spam_sample()
+        validate_sample(weak, allow_gmail_spam=True)
+        with self.assertRaisesRegex(ValueError, "training-only"):
+            validate_sample(weak)
+        bad_samples = []
+        for split in (None, "val"):
+            row = copy.deepcopy(weak)
+            row["metadata"]["split"] = split
+            bad_samples.append(row)
+        for probabilities in ({"ja": 0.0, "nein": 1.0}, {"ja": .9, "nein": .1},
+                              {"false": 0.0, "true": 1.0}):
+            row = copy.deepcopy(weak)
+            row["gold"]["spamverdacht"]["probabilities"] = probabilities
+            bad_samples.append(row)
+        row = copy.deepcopy(weak)
+        row["questions"].update(sample()["questions"])
+        row["gold"].update(sample()["gold"])
+        bad_samples.append(row)
+        for row in bad_samples:
+            with self.subTest(metadata=row["metadata"]), self.assertRaises(ValueError):
+                validate_sample(row, allow_gmail_spam=True)
+
+    def test_gmail_spam_stays_in_training_and_is_rejected_by_both_evaluation_paths(self):
+        from evaluate_model import load_data, run_eval
+
+        weak = gmail_spam_sample()
+        with tempfile.TemporaryDirectory() as folder:
+            path, val_path = Path(folder) / "train.jsonl", Path(folder) / "val.jsonl"
+            human_train = sample()
+            human_val = sample("Synthetic validation example", "val")
+            path.write_text("\n".join(json.dumps(row) for row in (human_train, human_val, weak)), encoding="utf-8")
+            train, val = load_dataset(path, val_ratio=1.0)
+            self.assertEqual(train, [human_train, weak])
+            self.assertEqual(val, [human_val])
+            val_path.write_text(json.dumps(weak), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "training-only"):
+                load_data(val_path)
+            with self.assertRaisesRegex(ValueError, "training-only"):
+                run_eval(Mock(), [weak])
+            path.write_text(json.dumps(human_train), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "training-only"):
+                load_dataset(path, val_file_path=val_path)
+
     def test_load_dataset_and_split(self):
         with tempfile.TemporaryDirectory() as folder:
             data_file = Path(folder) / "test_data.jsonl"
@@ -97,6 +152,11 @@ class TrainingPipelineCheck(unittest.TestCase):
         self.assertEqual(items[0]["qid"], "inhalt")
         self.assertEqual(items[0]["target"], [1.0, 0.0, 0.0, 0.0])
         self.assertEqual(len(items[0]["markers"]), 4)
+        spam_items = build_sample_items(DummyTok(), gmail_spam_sample(), max_len=128, head_max_len=64)
+        self.assertEqual(len(spam_items), 1)
+        self.assertEqual(spam_items[0]["qid"], "spamverdacht")
+        self.assertEqual(spam_items[0]["target"], [1.0, 0.0])
+        self.assertEqual(len(spam_items[0]["markers"]), 2)
         with self.assertRaisesRegex(ValueError, "lost option markers"):
             build_sample_items(DummyTok(), sample, max_len=8, head_max_len=64)
 

@@ -19,7 +19,8 @@ from urllib.parse import parse_qs, urlsplit
 
 import requests
 
-from pilot_gmail import save_report, gmail_get, INPUT_VERSION, QUESTIONS
+from pilot_gmail import save_report, gmail_get, INPUT_VERSION, QUESTIONS, PilotError
+from spam_training import collect_spam
 import account_setup
 
 try:
@@ -142,6 +143,15 @@ class Dashboard:
         feedback_file = directory / "feedback.json"
         self.feedback = (json.loads(feedback_file.read_text(encoding="utf-8"))
                          if feedback_file.exists() else {"revision": None, "items": {}})
+        self.spam_training_file = directory / "spam-training.json"
+        self.spam_training = (json.loads(self.spam_training_file.read_text(encoding="utf-8"))
+                              if self.spam_training_file.exists() else
+                              {"phase": "idle", "items": {}, "processed": 0, "total": 0,
+                               "added": 0, "errors": [], "started_at": None, "finished_at": None})
+        if self.spam_training["phase"] == "running":
+            self.spam_training.update(phase="error", finished_at=now(), errors=[
+                "Der Spam-Import wurde durch einen Neustart unterbrochen. Gespeicherte Beispiele bleiben erhalten."])
+            save_report(self.spam_training_file, self.spam_training)
         self.state = {"phase": "idle", "processed": 0, "total": 0, "batch_mode": "latest", "requested_limit": 20,
                       "started_at": None, "finished_at": None, "error": None,
                       "model": {"name": "Laya multilingual", "device": "cpu", "host": "Mac mini"},
@@ -197,7 +207,8 @@ class Dashboard:
             return account_setup.prepare(self.directory, email, permission)
 
     def require_accounts_idle(self):
-        if self.state["phase"] == "running" or self.applying_labels or self.connecting_account:
+        if (self.state["phase"] == "running" or self.applying_labels or self.connecting_account
+                or self.spam_training["phase"] == "running"):
             raise AccountError("Bitte warten, bis der laufende Vorgang beendet ist.", 409)
 
     def change_account(self, action, *args):
@@ -357,12 +368,14 @@ class Dashboard:
         report["summary"] = {"reviewed": reviewed, "skipped": skipped,
                              "pending": len(report["messages"]) - reviewed - skipped,
                              "training_examples": sum(training_eligible(item) for item in self.feedback["items"].values()),
-                             "distribution": distribution}
+                             "distribution": distribution,
+                             "spam_training_examples": len(self.spam_training_examples())}
         return report
 
     def apply_current_labels(self):
         with self.lock:
-            if self.state["phase"] == "running" or self.applying_labels or self.connecting_account:
+            if (self.state["phase"] == "running" or self.applying_labels or self.connecting_account
+                    or self.spam_training["phase"] == "running"):
                 raise FeedbackError("Bitte warten, bis der aktuelle Lauf beendet ist.", 409)
             target_path = self.report_path
             if not target_path or not target_path.is_file():
@@ -524,8 +537,119 @@ class Dashboard:
             self.feedback = pending
             return self.review_report()
 
+    def spam_training_examples(self):
+        """Caller holds lock. Human decisions (including skips) always take precedence."""
+        reviewed_ids = set()
+        seen_states = set()
+        for key, item in self.feedback["items"].items():
+            owner = item.get("account_email") or (key.rsplit(":", 1)[0] if ":" in key else self.account)
+            message_id = item.get("message_id") or key.rsplit(":", 1)[-1]
+            reviewed_ids.add((owner.casefold(), message_id.casefold()))
+            if valid_input(item.get("model_input")):
+                seen_states.add(item["model_input"]["state"])
+        examples = []
+        for item in self.spam_training["items"].values():
+            if (item.get("label_source") != "gmail_spam" or not valid_input(item.get("model_input"))
+                    or (item["account_email"].casefold(), item["message_id"].casefold()) in reviewed_ids):
+                continue
+            state = item["model_input"]["state"]
+            if state in seen_states:
+                continue
+            seen_states.add(state)
+            question = item["model_input"]["questions"]["spamverdacht"]
+            examples.append({"model": "multilingual", "state": state,
+                             "questions": {"spamverdacht": question},
+                             "gold": {"spamverdacht": {"type": "choice", "probabilities": {"ja": 1.0, "nein": 0.0}}},
+                             "metadata": {"label_source": "gmail_spam", "split": "train",
+                                          "message_id": item["message_id"], "account_email": item["account_email"],
+                                          "input_version": item["input_version"], "imported_at": item["imported_at"]}})
+        return examples
+
+    def spam_training_status(self):
+        return {**{key: value for key, value in self.spam_training.items() if key != "items"},
+                "available": len(self.spam_training_examples())}
+
+    def start_spam_training(self, limit=20):
+        if type(limit) is not int or not 1 <= limit <= 100:
+            raise FeedbackError("Bitte eine ganze Anzahl zwischen 1 und 100 wählen.")
+        with self.lock:
+            if (self.state["phase"] == "running" or self.applying_labels or self.connecting_account
+                    or self.spam_training["phase"] == "running"):
+                raise FeedbackError("Bitte warten, bis der laufende Vorgang beendet ist.", 409)
+            targets = self.accounts_mgr.get_active_targets()
+            if not targets:
+                raise FeedbackError("Kein ausgewähltes, aktives Postfach mit Anmeldung verfügbar.", 409)
+            pending = dict(self.spam_training, phase="running", processed=0, total=limit, added=0,
+                           errors=[], started_at=now(), finished_at=None)
+            save_report(self.spam_training_file, pending)
+            self.spam_training = pending
+            try:
+                threading.Thread(target=self.run_spam_training, args=(targets, limit), daemon=True).start()
+            except RuntimeError:
+                self.spam_training.update(phase="error", finished_at=now(),
+                                          errors=["Der Spam-Import konnte nicht gestartet werden."])
+                save_report(self.spam_training_file, self.spam_training)
+                raise OSError("Spam worker unavailable") from None
+        return {"status": "started"}
+
+    def run_spam_training(self, targets, limit):
+        try:
+            from google.oauth2.credentials import Credentials
+            from google.auth.transport.requests import AuthorizedSession
+            remaining = limit
+            for index, target in enumerate(targets):
+                if remaining <= 0:
+                    break
+                email = target["email"].casefold()
+                with self.lock:
+                    excluded = {item["message_id"] for item in self.spam_training["items"].values()
+                                if item["account_email"].casefold() == email}
+                    for key, item in self.feedback["items"].items():
+                        owner = item.get("account_email") or (key.rsplit(":", 1)[0] if ":" in key else self.account)
+                        if owner.casefold() == email:
+                            excluded.add(item.get("message_id") or key.rsplit(":", 1)[-1])
+                quota = max(1, (remaining + len(targets) - index - 1) // (len(targets) - index))
+                try:
+                    credentials = Credentials.from_authorized_user_file(target["token_path"])
+                    with AuthorizedSession(credentials) as session:
+                        session.trust_env = False
+                        result = collect_spam(session, email, excluded, quota)
+                except PilotError as error:
+                    result = {"items": [], "processed": 0, "errors": [str(error)]}
+                except Exception:
+                    result = {"items": [], "processed": 0, "errors": ["gmail_request_failed"]}
+                remaining -= result["processed"]
+                with self.lock:
+                    items = dict(self.spam_training["items"])
+                    for item in result["items"]:
+                        items[self.review_key(item)] = {**item, "label_source": "gmail_spam", "imported_at": now()}
+                    errors = self.spam_training["errors"] + [PILOT_FAILURE_MESSAGES.get(
+                        code, "Ein Spam-Beispiel konnte nicht eingelesen werden. Bitte den Import erneut versuchen.")
+                        for code in result["errors"]]
+                    pending = dict(self.spam_training, items=items,
+                                   processed=self.spam_training["processed"] + result["processed"],
+                                   added=self.spam_training["added"] + len(items) - len(self.spam_training["items"]),
+                                   errors=list(dict.fromkeys(errors)))
+                    save_report(self.spam_training_file, pending)
+                    self.spam_training = pending
+            with self.lock:
+                pending = dict(self.spam_training, phase="error" if self.spam_training["errors"] else "complete",
+                               total=self.spam_training["processed"], finished_at=now())
+                save_report(self.spam_training_file, pending)
+                self.spam_training = pending
+        except Exception:
+            with self.lock:
+                self.spam_training.update(phase="error", finished_at=now(), errors=[
+                    "Der Spam-Import konnte nicht abgeschlossen werden. Bitte Speicherplatz und Anmeldung prüfen."])
+                try:
+                    save_report(self.spam_training_file, self.spam_training)
+                except OSError:
+                    pass
+
     def training_export(self, split=None):
         with self.lock:
+            if self.spam_training["phase"] == "running":
+                raise FeedbackError("Bitte warten, bis der Spam-Import beendet ist.", 409)
             examples = []
             for message_id, item in self.feedback["items"].items():
                 if not training_eligible(item):
@@ -545,6 +669,8 @@ class Dashboard:
                 metadata["account_email"] = item.get("account_email", self.account)
                 metadata["split"] = item_split
                 examples.append(json.dumps({**payload, "gold": gold, "metadata": metadata}, ensure_ascii=False))
+            if split != "val":
+                examples.extend(json.dumps(item, ensure_ascii=False) for item in self.spam_training_examples())
             return ("\n".join(examples) + ("\n" if examples else "")).encode()
 
     def status(self):
@@ -552,6 +678,7 @@ class Dashboard:
             state = dict(self.state)
             state["applying_labels"] = self.applying_labels
             state["feedback_revision"] = self.feedback["revision"]
+            state["spam_training"] = self.spam_training_status()
             if state["phase"] == "running":
                 try:
                     progress = json.loads((self.directory / "progress.json").read_text())
@@ -609,7 +736,8 @@ class Dashboard:
         if mode == "all":
             limit = None
         with self.lock:
-            if self.state["phase"] == "running" or self.applying_labels or self.connecting_account:
+            if (self.state["phase"] == "running" or self.applying_labels or self.connecting_account
+                    or self.spam_training["phase"] == "running"):
                 return False
             targets = self.accounts_mgr.get_active_targets()
             if not targets:
@@ -862,7 +990,10 @@ class Handler(BaseHTTPRequestHandler):
             if split not in {"train", "val"}:
                 split = None
             filename = f"laya-mail-{split}.jsonl" if split else "laya-mail-training.jsonl"
-            self.respond(200, self.app.training_export(split=split), "application/x-ndjson; charset=utf-8", download=filename)
+            try:
+                self.respond(200, self.app.training_export(split=split), "application/x-ndjson; charset=utf-8", download=filename)
+            except FeedbackError as error:
+                self.json(error.status, {"error": str(error)})
         elif path in {"/", "/app.js", "/style.css", "/accounts/new", "/onboarding.js", "/onboarding.css"}:
             filename, kind = {"/": ("index.html", "text/html"), "/app.js": ("app.js", "text/javascript"),
                               "/style.css": ("style.css", "text/css"), "/accounts/new": ("onboarding.html", "text/html"),
@@ -981,6 +1112,18 @@ class Handler(BaseHTTPRequestHandler):
                 self.json(error.status, {"error": str(error)})
             except OSError:
                 self.json(503, {"error": "Der Stopp konnte nicht gespeichert werden. Bitte erneut versuchen."})
+        elif path == "/api/spam-training":
+            try:
+                value = json.loads(data or b"{}")
+                if not isinstance(value, dict):
+                    raise FeedbackError("Ungültige Importanfrage.")
+                self.json(202, self.app.start_spam_training(value.get("limit", 20)))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                self.json(400, {"error": "Die Importanfrage ist kein gültiges JSON."})
+            except FeedbackError as error:
+                self.json(error.status, {"error": str(error)})
+            except OSError:
+                self.json(503, {"error": "Der Spam-Import kann gerade nicht gestartet werden. Bitte Speicherplatz und Dienst prüfen."})
         elif path == "/api/run":
             try:
                 value = json.loads(data or b"{}")
