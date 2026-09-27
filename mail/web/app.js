@@ -625,7 +625,7 @@ $('btn-apply-current')?.addEventListener('click', async () => {
     if (res.status === 'ok') {
       const errNote = res.errors && res.errors.length ? ` (${res.errors.join('; ')})` : '';
       showError(`✓ ${res.applied_count} von ${res.total_messages} E-Mails erfolgreich in Gmail gelabelt!${errNote}`);
-      await refreshReport();
+      await refreshStatus();
     } else {
       showError(res.error || 'Fehler beim Vergeben der Labels.');
     }

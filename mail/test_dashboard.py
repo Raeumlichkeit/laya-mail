@@ -211,5 +211,110 @@ class DashboardCheck(unittest.TestCase):
                 thread.join()
 
 
+    def test_apply_current_labels_logic(self):
+        with tempfile.TemporaryDirectory() as folder:
+            directory = Path(folder)
+            key = "synthetic-test-key-not-a-real-credential"
+            (directory / "dashboard-key").write_text(key)
+            (directory / "token.json").write_text(json.dumps({"token": "fake"}))
+
+            valid_questions = {name: {"type": "choice", "instructions": name,
+                                      "criteria": {option: option for option in sorted(choices)}}
+                               for name, choices in LABELS.items()}
+            msg1 = {
+                "message_id": "msg1",
+                "status": "suggestion",
+                "model_input": {"model": "multilingual", "state": "Invoice 123", "questions": valid_questions},
+                "suggestions": {"inhalt": "info", "wichtig": "nein", "spamverdacht": "nein"},
+            }
+            msg2 = {
+                "message_id": "msg2",
+                "status": "suggestion",
+                "model_input": {"model": "multilingual", "state": "Newsletter", "questions": valid_questions},
+                "suggestions": {"inhalt": "werbung", "wichtig": "nein", "spamverdacht": "nein"},
+            }
+            msg3 = {
+                "message_id": "msg3",
+                "status": "error",
+                "model_input": {"model": "multilingual", "state": "Broken", "questions": valid_questions},
+                "suggestions": {"inhalt": "info", "wichtig": "nein", "spamverdacht": "nein"},
+            }
+            msg4 = {
+                "message_id": "msg4",
+                "status": "suggestion",
+                "model_input": {"model": "multilingual", "state": "Invalid choices", "questions": valid_questions},
+                "suggestions": {"inhalt": "invalid_choice", "wichtig": "nein", "spamverdacht": "nein"},
+            }
+
+            from dashboard import snapshot_id
+            snap1 = snapshot_id(msg1, "mail-v2")
+            feedback_data = {
+                "revision": 1,
+                "items": {
+                    "msg1": {
+                        "action": "corrected",
+                        "snapshot_id": snap1,
+                        "labels": {"inhalt": "rechnung", "wichtig": "ja", "spamverdacht": "nein"},
+                    },
+                    "msg2": {
+                        "action": "corrected",
+                        "snapshot_id": "mismatched-snap",
+                        "labels": {"inhalt": "rechnung", "wichtig": "ja", "spamverdacht": "nein"},
+                    }
+                }
+            }
+            (directory / "feedback.json").write_text(json.dumps(feedback_data))
+            report = {
+                "input_version": "mail-v2",
+                "created_utc": "2026-09-27T08:00:00Z",
+                "messages": [msg1, msg2, msg3, msg4]
+            }
+            (directory / "pilot-test.json").write_text(json.dumps(report))
+
+            app = Dashboard(directory, "test@example.invalid", "http://127.0.0.1:8000/v1/systemone")
+
+            # 1. Test concurrency lock
+            app.applying_labels = True
+            with self.assertRaises(Exception):
+                app.apply_current_labels()
+            app.applying_labels = False
+
+            # 2. Test label selection and application
+            applied_records = []
+            def fake_apply(session, message_id, effective, label_cache, archive=False):
+                applied_records.append((message_id, effective))
+                return ["FakeLabel"]
+
+            with patch("labeler.get_or_create_labels", return_value={"FakeLabel": "lbl_1"}), \
+                 patch("labeler.apply_labels", side_effect=fake_apply), \
+                 patch("google.oauth2.credentials.Credentials.from_authorized_user_file", return_value=object()), \
+                 patch("google.auth.transport.requests.AuthorizedSession", return_value=unittest.mock.MagicMock()):
+                res = app.apply_current_labels()
+                self.assertEqual(res["status"], "ok")
+                self.assertEqual(res["applied_count"], 2)
+                # msg1 used corrected feedback labels
+                self.assertEqual(applied_records[0], ("msg1", {"inhalt": "rechnung", "wichtig": "ja", "spamverdacht": "nein"}))
+                # msg2 fell back to valid plain suggestions because snapshot mismatched
+                self.assertEqual(applied_records[1], ("msg2", {"inhalt": "werbung", "wichtig": "nein", "spamverdacht": "nein"}))
+                # msg3 (error status) and msg4 (invalid choices) were skipped
+                self.assertEqual(len(applied_records), 2)
+                self.assertFalse(app.applying_labels)
+
+            # 3. Test report path change during run
+            with patch("labeler.get_or_create_labels", return_value={"FakeLabel": "lbl_1"}), \
+                 patch("labeler.apply_labels", side_effect=fake_apply), \
+                 patch("google.oauth2.credentials.Credentials.from_authorized_user_file", return_value=object()), \
+                 patch("google.auth.transport.requests.AuthorizedSession", return_value=unittest.mock.MagicMock()):
+                orig_target = app.report_path
+                def switch_report(session, msg_id, eff, cache, archive=False):
+                    app.report_path = directory / "other-report.json"
+                    return ["FakeLabel"]
+                with patch("labeler.apply_labels", side_effect=switch_report):
+                    res2 = app.apply_current_labels()
+                    self.assertTrue(any("Berichtspfad hat sich" in e for e in res2["errors"]))
+                app.report_path = orig_target
+
+
 if __name__ == "__main__":
     unittest.main()
+

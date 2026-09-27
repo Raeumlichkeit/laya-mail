@@ -65,6 +65,13 @@ class AccountManagerTests(unittest.TestCase):
         with self.assertRaises(AccountError):
             mgr.add_account("invalid-email")
 
+    def test_get_token_path(self):
+        mgr = AccountManager(self.dir, "first@example.com")
+        mgr.add_account("second@example.com", "token_custom.json")
+        self.assertEqual(mgr.get_token_path("first@example.com"), self.dir / "token.json")
+        self.assertEqual(mgr.get_token_path("second@example.com"), self.dir / "token_custom.json")
+        self.assertIsNone(mgr.get_token_path("unknown@example.com"))
+
 
 if __name__ == "__main__":
     unittest.main()

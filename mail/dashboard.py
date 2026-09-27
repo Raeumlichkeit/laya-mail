@@ -111,6 +111,7 @@ class Dashboard:
         if len(self.key) < 24:
             raise ValueError("Dashboard key must be random and at least 24 characters")
         self.lock = threading.Lock()
+        self.applying_labels = False
         feedback_file = directory / "feedback.json"
         self.feedback = (json.loads(feedback_file.read_text(encoding="utf-8"))
                          if feedback_file.exists() else {"revision": None, "items": {}})
@@ -276,83 +277,104 @@ class Dashboard:
 
     def apply_current_labels(self):
         with self.lock:
-            if self.state["phase"] == "running":
+            if self.state["phase"] == "running" or self.applying_labels:
                 raise FeedbackError("Bitte warten, bis der aktuelle Lauf beendet ist.", 409)
-            if not self.report_path or not self.report_path.is_file():
+            target_path = self.report_path
+            if not target_path or not target_path.is_file():
                 raise FeedbackError("Keine Mails zum Labeln vorhanden.", 404)
             try:
-                report = json.loads(self.report_path.read_text(encoding="utf-8"))
+                report = json.loads(target_path.read_text(encoding="utf-8"))
             except Exception as err:
                 raise FeedbackError("Bericht konnte nicht gelesen werden.", 500) from err
 
             messages = report.get("messages", [])
             if not messages:
-                return {"status": "ok", "applied_count": 0, "message": "Keine Mails im aktuellen Bericht vorhanden."}
+                return {"status": "ok", "applied_count": 0, "total_messages": 0, "errors": []}
+
+            input_version = report.get("input_version")
+            self.applying_labels = True
 
         try:
             try:
-                from labeler import get_or_create_labels, apply_labels
-            except ImportError:
-                from mail.labeler import get_or_create_labels, apply_labels
-        except ImportError as err:
-            raise FeedbackError("Labeler-Modul nicht verfuegbar.", 500) from err
-
-        try:
-            from google.oauth2.credentials import Credentials
-            from google.auth.transport.requests import AuthorizedSession
-        except ImportError as err:
-            raise FeedbackError("Google Auth nicht verfuegbar.", 500) from err
-
-        grouped = {}
-        for msg in messages:
-            email = msg.get("account_email") or self.account
-            grouped.setdefault(email, []).append(msg)
-
-        applied_count = 0
-        errors = []
-
-        for email, account_messages in grouped.items():
-            token_path = self.accounts_mgr.get_token_path(email)
-            if not token_path or not Path(token_path).is_file():
-                token_path = str(self.directory / "token.json")
-            if not Path(token_path).is_file():
-                errors.append(f"Token fuer {email} nicht gefunden.")
-                continue
+                try:
+                    from labeler import get_or_create_labels, apply_labels
+                except ImportError:
+                    from mail.labeler import get_or_create_labels, apply_labels
+            except ImportError as err:
+                raise FeedbackError("Labeler-Modul nicht verfuegbar.", 500) from err
 
             try:
-                creds = Credentials.from_authorized_user_file(str(token_path))
-                with AuthorizedSession(creds) as session:
-                    session.trust_env = False
-                    label_cache = get_or_create_labels(session)
-                    for msg in account_messages:
-                        msg_id = msg.get("message_id")
-                        if not msg_id:
-                            continue
-                        if msg_id in self.feedback.get("items", {}):
-                            effective = self.feedback["items"][msg_id].get("labels", {})
-                        else:
-                            sug = msg.get("suggestions", {})
-                            effective = {k: v.get("choice") for k, v in sug.items() if isinstance(v, dict)}
+                from google.oauth2.credentials import Credentials
+                from google.auth.transport.requests import AuthorizedSession
+            except ImportError as err:
+                raise FeedbackError("Google Auth nicht verfuegbar.", 500) from err
 
-                        applied = apply_labels(session, msg_id, effective, label_cache, archive=False)
-                        if applied:
-                            msg["applied_labels"] = applied
-                            applied_count += 1
-            except Exception as err:
-                errors.append(f"Fehler bei {email}: {err}")
+            grouped = {}
+            for msg in messages:
+                email = msg.get("account_email") or self.account
+                grouped.setdefault(email, []).append(msg)
 
-        with self.lock:
-            try:
-                save_report(self.report_path, report)
-            except Exception:
-                pass
+            applied_count = 0
+            errors = []
 
-        return {
-            "status": "ok",
-            "applied_count": applied_count,
-            "total_messages": len(messages),
-            "errors": errors,
-        }
+            for email, account_messages in grouped.items():
+                token_path = self.accounts_mgr.get_token_path(email)
+                if not token_path or not Path(token_path).is_file():
+                    token_path = str(self.directory / "token.json")
+                if not Path(token_path).is_file():
+                    errors.append(f"Token fuer {email} nicht gefunden.")
+                    continue
+
+                try:
+                    creds = Credentials.from_authorized_user_file(str(token_path))
+                    with AuthorizedSession(creds) as session:
+                        session.trust_env = False
+                        label_cache = get_or_create_labels(session)
+                        for msg in account_messages:
+                            msg_id = msg.get("message_id")
+                            if not msg_id:
+                                continue
+
+                            fingerprint = snapshot_id(msg, input_version)
+                            effective = None
+                            item = self.feedback.get("items", {}).get(msg_id)
+                            if (item
+                                    and item.get("action") in {"accepted", "corrected"}
+                                    and fingerprint is not None
+                                    and item.get("snapshot_id") == fingerprint
+                                    and valid_labels(item.get("labels"))):
+                                effective = item["labels"]
+                            elif msg.get("status") == "suggestion" and valid_labels(msg.get("suggestions")):
+                                effective = msg["suggestions"]
+
+                            if not effective:
+                                continue
+
+                            applied = apply_labels(session, msg_id, effective, label_cache, archive=False)
+                            if applied:
+                                msg["applied_labels"] = applied
+                                applied_count += 1
+                except Exception as err:
+                    errors.append(f"Fehler bei {email}: {err}")
+
+            with self.lock:
+                if self.report_path != target_path:
+                    errors.append("Der Berichtspfad hat sich waehrend des Labelns geaendert; Bericht nicht ueberschrieben.")
+                else:
+                    try:
+                        save_report(target_path, report)
+                    except Exception as err:
+                        errors.append(f"Bericht konnte nicht gespeichert werden: {err}")
+
+            return {
+                "status": "ok",
+                "applied_count": applied_count,
+                "total_messages": len(messages),
+                "errors": errors,
+            }
+        finally:
+            with self.lock:
+                self.applying_labels = False
 
 
     def save_feedback(self, data):

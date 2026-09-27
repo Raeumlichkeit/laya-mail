@@ -146,3 +146,12 @@ class AccountManager:
                 token_path = self.directory / acc["token_file"]
                 active.append({"email": acc["email"], "token_path": str(token_path)})
         return active
+
+    def get_token_path(self, email):
+        """Returns token Path for the given email, or None."""
+        email = (email or "").strip().lower()
+        for acc in self.list_accounts():
+            if acc["email"].lower() == email or acc["id"].lower() == email:
+                return self.directory / acc["token_file"]
+        return None
+
