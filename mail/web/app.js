@@ -110,6 +110,15 @@ function renderStatus() {
   $('run').disabled = locked;
   $('run-next').disabled = locked;
   $('mail-limit').disabled = locked;
+  if ($('run-rescan')) {
+    $('run-rescan').disabled = locked;
+    $('run-rescan-label').textContent = (running || starting) && activeMode === 'rescan' ? `Sortiert bis zu ${activeLimit} Mails …` : `${selectedText}Mails neu durchsortieren`;
+  }
+  if ($('btn-apply-current')) {
+    const hasMessages = Boolean(report?.messages && report.messages.length > 0);
+    $('btn-apply-current').disabled = locked || !hasMessages;
+    $('btn-apply-current-label').textContent = hasMessages ? `${report.messages.length} geladene Mails in Gmail labeln` : 'Geladene Mails in Gmail labeln';
+  }
   $('run-label').textContent = (running || starting) && activeMode === 'latest' ? `Prüft bis zu ${activeLimit} Mails …` : report.report_id ? `Neueste ${selectedText}erneut prüfen` : `${selectedText}Mails prüfen`;
   $('run-next-label').textContent = (running || starting) && activeMode === 'next' ? `Lädt bis zu ${activeLimit} Mails …` : `Nächste ${selectedText}Mails laden`;
   $('status-symbol').className = `status-symbol${running ? ' running' : failed ? ' error' : ''}`;
@@ -600,7 +609,34 @@ async function startRun(mode) {
 }
 $('run').addEventListener('click', () => startRun('latest'));
 $('run-next').addEventListener('click', () => startRun('next'));
+$('run-rescan')?.addEventListener('click', () => startRun('rescan'));
 $('mail-limit').addEventListener('input', renderStatus);
+
+$('btn-apply-current')?.addEventListener('click', async () => {
+  const btn = $('btn-apply-current');
+  const labelSpan = $('btn-apply-current-label');
+  if (!btn || btn.disabled) return;
+  btn.disabled = true;
+  const oldText = labelSpan ? labelSpan.textContent : '';
+  if (labelSpan) labelSpan.textContent = 'Labels werden in Gmail vergeben …';
+  showError('');
+  try {
+    const res = await api('/api/labels/apply-current', 'POST', {});
+    if (res.status === 'ok') {
+      const errNote = res.errors && res.errors.length ? ` (${res.errors.join('; ')})` : '';
+      showError(`✓ ${res.applied_count} von ${res.total_messages} E-Mails erfolgreich in Gmail gelabelt!${errNote}`);
+      await refreshReport();
+    } else {
+      showError(res.error || 'Fehler beim Vergeben der Labels.');
+    }
+  } catch (err) {
+    showError(`Fehler beim Labeln: ${err.message}`);
+  } finally {
+    btn.disabled = false;
+    if (labelSpan) labelSpan.textContent = oldText;
+    renderStatus();
+  }
+});
 
 $('account-select')?.addEventListener('change', async (e) => {
   try {

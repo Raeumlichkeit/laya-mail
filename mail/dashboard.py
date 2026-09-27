@@ -274,6 +274,87 @@ class Dashboard:
                              "distribution": distribution}
         return report
 
+    def apply_current_labels(self):
+        with self.lock:
+            if self.state["phase"] == "running":
+                raise FeedbackError("Bitte warten, bis der aktuelle Lauf beendet ist.", 409)
+            if not self.report_path or not self.report_path.is_file():
+                raise FeedbackError("Keine Mails zum Labeln vorhanden.", 404)
+            try:
+                report = json.loads(self.report_path.read_text(encoding="utf-8"))
+            except Exception as err:
+                raise FeedbackError("Bericht konnte nicht gelesen werden.", 500) from err
+
+            messages = report.get("messages", [])
+            if not messages:
+                return {"status": "ok", "applied_count": 0, "message": "Keine Mails im aktuellen Bericht vorhanden."}
+
+        try:
+            try:
+                from labeler import get_or_create_labels, apply_labels
+            except ImportError:
+                from mail.labeler import get_or_create_labels, apply_labels
+        except ImportError as err:
+            raise FeedbackError("Labeler-Modul nicht verfuegbar.", 500) from err
+
+        try:
+            from google.oauth2.credentials import Credentials
+            from google.auth.transport.requests import AuthorizedSession
+        except ImportError as err:
+            raise FeedbackError("Google Auth nicht verfuegbar.", 500) from err
+
+        grouped = {}
+        for msg in messages:
+            email = msg.get("account_email") or self.account
+            grouped.setdefault(email, []).append(msg)
+
+        applied_count = 0
+        errors = []
+
+        for email, account_messages in grouped.items():
+            token_path = self.accounts_mgr.get_token_path(email)
+            if not token_path or not Path(token_path).is_file():
+                token_path = str(self.directory / "token.json")
+            if not Path(token_path).is_file():
+                errors.append(f"Token fuer {email} nicht gefunden.")
+                continue
+
+            try:
+                creds = Credentials.from_authorized_user_file(str(token_path))
+                with AuthorizedSession(creds) as session:
+                    session.trust_env = False
+                    label_cache = get_or_create_labels(session)
+                    for msg in account_messages:
+                        msg_id = msg.get("message_id")
+                        if not msg_id:
+                            continue
+                        if msg_id in self.feedback.get("items", {}):
+                            effective = self.feedback["items"][msg_id].get("labels", {})
+                        else:
+                            sug = msg.get("suggestions", {})
+                            effective = {k: v.get("choice") for k, v in sug.items() if isinstance(v, dict)}
+
+                        applied = apply_labels(session, msg_id, effective, label_cache, archive=False)
+                        if applied:
+                            msg["applied_labels"] = applied
+                            applied_count += 1
+            except Exception as err:
+                errors.append(f"Fehler bei {email}: {err}")
+
+        with self.lock:
+            try:
+                save_report(self.report_path, report)
+            except Exception:
+                pass
+
+        return {
+            "status": "ok",
+            "applied_count": applied_count,
+            "total_messages": len(messages),
+            "errors": errors,
+        }
+
+
     def save_feedback(self, data):
         if (not isinstance(data, dict) or not isinstance(data.get("action"), str)
                 or data["action"] not in {"accepted", "corrected", "skipped"}):
@@ -385,7 +466,7 @@ class Dashboard:
         return (*cpu[:3], "Hauptrechner nicht bereit; dieser Stapel läuft auf dem Mac mini.")
 
     def start(self, mode="latest", limit=20):
-        if not isinstance(mode, str) or mode not in {"latest", "next"}:
+        if not isinstance(mode, str) or mode not in {"latest", "next", "rescan"}:
             raise FeedbackError("Bitte eine gültige Ladeaktion wählen.")
         if type(limit) is not int or not 1 <= limit <= 100:
             raise FeedbackError("Bitte eine ganze Anzahl zwischen 1 und 100 wählen.")
@@ -444,7 +525,7 @@ class Dashboard:
             ]
             if mode == "next":
                 command.extend(["--exclude-ids-file", str(self.directory / "seen-message-ids.json")])
-            if sort_inbox:
+            if sort_inbox or mode == "rescan":
                 command.append("--apply-labels")
 
             try:
@@ -685,6 +766,13 @@ class Handler(BaseHTTPRequestHandler):
                 self.json(400, {"error": "Ungültiges JSON."})
             except AccountError as error:
                 self.json(error.status, {"error": str(error)})
+        elif path == "/api/labels/apply-current":
+            try:
+                self.json(200, self.app.apply_current_labels())
+            except FeedbackError as error:
+                self.json(error.status, {"error": str(error)})
+            except Exception as error:
+                self.json(500, {"error": f"Fehler beim Labeln: {error}"})
         elif path == "/api/run":
             try:
                 value = json.loads(data or b"{}")

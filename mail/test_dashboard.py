@@ -190,6 +190,21 @@ class DashboardCheck(unittest.TestCase):
                     status_res = client.get(origin + "/api/status", headers=headers).json()
                     self.assertFalse(status_res["read_only"])
                     self.assertTrue(status_res["settings"]["live_mode"])
+
+                    # Test apply-current without report
+                    apply_none = client.post(origin + "/api/labels/apply-current", json={}, headers=headers)
+                    self.assertEqual(apply_none.status_code, 404)
+
+                    with patch.object(app, "apply_current_labels", return_value={"status": "ok", "applied_count": 2, "total_messages": 2, "errors": []}):
+                        apply_res = client.post(origin + "/api/labels/apply-current", json={}, headers=headers)
+                        self.assertEqual(apply_res.status_code, 200)
+                        self.assertEqual(apply_res.json()["applied_count"], 2)
+
+                    # Test rescan mode in start
+                    with patch.object(app, "run"):
+                        self.assertTrue(app.start(mode="rescan", limit=15))
+                        self.assertEqual(app.status()["batch_mode"], "rescan")
+                        self.assertEqual(app.status()["requested_limit"], 15)
             finally:
                 server.shutdown()
                 server.server_close()

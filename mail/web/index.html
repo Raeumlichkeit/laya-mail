@@ -38,7 +38,7 @@
 
     <section class="status-panel" aria-labelledby="status-heading">
       <div class="status-main"><div class="status-symbol" id="status-symbol" aria-hidden="true"><span></span></div><div><p class="eyebrow">Lokale Auswertung</p><h2 id="status-heading">Verbindung wird hergestellt …</h2><p id="status-description" class="muted" role="status" aria-live="polite">Der aktuelle Stand wird geladen.</p><p id="processing-location" class="processing-location">Auswertung: Mac mini · CPU</p><p id="processing-note" class="processing-note" hidden></p></div></div>
-      <div class="batch-actions"><label class="count-control" for="mail-limit"><span>Anzahl Mails</span><input id="mail-limit" type="number" min="1" max="100" step="1" value="20" inputmode="numeric" required aria-describedby="mail-limit-help" disabled></label><span id="mail-limit-help" class="count-help">1–100 · Größere Mengen dauern länger.</span><button id="run-next" class="primary-button" type="button" disabled><span aria-hidden="true">↗</span><span id="run-next-label">Nächste 20 Mails laden</span></button><button id="run" class="secondary-button" type="button" disabled><span id="run-label">20 Mails prüfen</span></button></div>
+      <div class="batch-actions"><label class="count-control" for="mail-limit"><span>Anzahl Mails</span><input id="mail-limit" type="number" min="1" max="100" step="1" value="20" inputmode="numeric" required aria-describedby="mail-limit-help" disabled></label><span id="mail-limit-help" class="count-help">1–100 · Größere Mengen dauern länger.</span><button id="run-next" class="primary-button" type="button" disabled><span aria-hidden="true">↗</span><span id="run-next-label">Nächste 20 Mails laden</span></button><button id="run" class="secondary-button" type="button" disabled><span id="run-label">20 Mails prüfen</span></button><button id="run-rescan" class="rescan-button" type="button" disabled title="Startet einen frischen Durchlauf ab Posteingang-Anfang und weist Labels im Postfach zu"><span aria-hidden="true">🔄</span><span id="run-rescan-label">Neu durchsortieren</span></button></div>
       <p class="batch-note">„Nächste Mails laden“ holt bisher nicht angezeigte Nachrichten aus dem Posteingang. Bewertungen bleiben erhalten.</p>
       
       <!-- Automation & Sorting Toggles -->
@@ -52,14 +52,19 @@
               <span class="toggle-desc">Prüft alle 3 Minuten neue Mails automatisch</span>
             </div>
           </label>
-          <label class="toggle-card" for="toggle-sort-inbox">
-            <input type="checkbox" id="toggle-sort-inbox" class="toggle-input">
-            <span class="toggle-switch" aria-hidden="true"><span class="toggle-knob"></span></span>
-            <div class="toggle-info">
-              <strong class="toggle-title">🏷️ Im Postfach sortieren</strong>
-              <span class="toggle-desc">Vergibt echte Gmail-Labels (Rechnung, Werbung etc.)</span>
-            </div>
-          </label>
+          <div class="toggle-card-wrap">
+            <label class="toggle-card" for="toggle-sort-inbox">
+              <input type="checkbox" id="toggle-sort-inbox" class="toggle-input">
+              <span class="toggle-switch" aria-hidden="true"><span class="toggle-knob"></span></span>
+              <div class="toggle-info">
+                <strong class="toggle-title">🏷️ Im Postfach sortieren</strong>
+                <span class="toggle-desc">Vergibt echte Gmail-Labels (Rechnung, Werbung etc.)</span>
+              </div>
+            </label>
+            <button id="btn-apply-current" class="action-sub-button" type="button" disabled title="Wendet die Labels sofort auf alle aktuell geladenen und bewerteten Mails in Gmail an">
+              <span aria-hidden="true">🏷️</span> <span id="btn-apply-current-label">Geladene Mails jetzt in Gmail labeln</span>
+            </button>
+          </div>
         </div>
         <div id="live-activity" class="live-activity" hidden>
           <span class="live-activity-dot" aria-hidden="true"></span>

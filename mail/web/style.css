@@ -69,3 +69,12 @@ mark.hl-security{background:#fce7f3;color:#9d174d;padding:1px 4px;border-radius:
 .label.account-label{color:#4338ca;background:#eef2ff;font-weight:650;border:1px solid #e0e7ff}
 .label.label-applied{color:#065f46;background:#d1fae5;font-weight:650;border:1px solid #a7f3d0}
 
+/* Rescan & Apply Current Labels Buttons */
+.rescan-button{display:flex;align-items:center;justify-content:center;gap:8px;color:#4f3fb2;background:#f5f3ff;border:1px solid #d4ccf7;border-radius:8px;min-height:36px;padding:8px 14px;font-size:12px;font-weight:650;transition:all .15s}
+.rescan-button:hover:enabled{background:#ede8fd;border-color:#b5a6ed;color:#3f3199}
+.rescan-button:disabled{opacity:.5;cursor:wait}
+.toggle-card-wrap{display:flex;flex-direction:column;gap:6px}
+.action-sub-button{display:inline-flex;align-items:center;justify-content:center;gap:6px;padding:7px 14px;border:1px solid #bbf7d0;border-radius:8px;background:#f0fdf4;color:#166534;font-size:11px;font-weight:650;cursor:pointer;transition:all .15s}
+.action-sub-button:hover:enabled{background:#dcfce7;border-color:#86efac;color:#14532d}
+.action-sub-button:disabled{opacity:.5;cursor:not-allowed}
+
