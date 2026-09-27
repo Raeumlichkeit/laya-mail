@@ -428,7 +428,9 @@ def main(argv=None):
             raise PilotError("laya_url_must_be_local")
         credentials = Credentials.from_authorized_user_file(str(args.token))
         scopes = set(credentials.scopes or [])
-        if not (scopes == {SCOPE} or (args.apply_labels and MODIFY_SCOPE in scopes) or (MODIFY_SCOPE in scopes and READONLY_SCOPE in scopes)):
+        if args.apply_labels and MODIFY_SCOPE not in scopes:
+            raise PilotError("modify_token_required")
+        if not (READONLY_SCOPE in scopes or MODIFY_SCOPE in scopes):
             raise PilotError("readonly_token_required")
         key = args.laya_key_file.read_text().strip()
         if not key:

@@ -1,6 +1,4 @@
 """Gmail label management and automatic sorting for Laya Mail."""
-import json
-import logging
 import requests
 
 GMAIL = "https://gmail.googleapis.com/gmail/v1/users/me"
@@ -19,15 +17,32 @@ class LabelerError(Exception):
     """Raised when label operations fail."""
 
 
+def managed_label_ids(label_cache):
+    """Require a complete, unambiguous cache before reconciling any labels."""
+    if not isinstance(label_cache, dict):
+        raise LabelerError("Ungueltiger Label-Cache.")
+    missing = [key for key in LABEL_MAP if not isinstance(label_cache.get(key), str) or not label_cache[key].strip()]
+    if missing:
+        raise LabelerError("Label-IDs fehlen fuer: " + ", ".join(LABEL_MAP[key] for key in missing))
+    managed = {key: label_cache[key] for key in LABEL_MAP}
+    system_ids = {"INBOX", "SPAM", "TRASH", "UNREAD", "STARRED", "IMPORTANT", "SENT", "DRAFT", "CHAT"}
+    if (len(set(managed.values())) != len(LABEL_MAP)
+            or any(value in system_ids or value.startswith("CATEGORY_") for value in managed.values())):
+        raise LabelerError("Ungueltige oder mehrdeutige verwaltete Label-IDs.")
+    return managed
+
+
 def get_or_create_labels(session):
     """Fetch existing Gmail labels and create required Laya sorting labels if missing."""
     try:
-        res = session.get(f"{GMAIL}/labels", timeout=15)
+        res = session.get(f"{GMAIL}/labels", timeout=15, allow_redirects=False)
         if res.status_code != 200:
             raise LabelerError(f"labels_list_failed_status_{res.status_code}")
         existing = {lbl.get("name", "").strip(): lbl.get("id") for lbl in res.json().get("labels", [])}
-    except Exception as err:
-        raise LabelerError(f"labels_fetch_failed: {err}") from err
+    except LabelerError:
+        raise
+    except Exception:
+        raise LabelerError("labels_fetch_failed") from None
 
     label_cache = {}
     for key, name in LABEL_MAP.items():
@@ -41,12 +56,15 @@ def get_or_create_labels(session):
             "messageListVisibility": "show",
         }
         try:
-            create_res = session.post(f"{GMAIL}/labels", json=payload, timeout=15)
+            create_res = session.post(f"{GMAIL}/labels", json=payload, timeout=15, allow_redirects=False)
             if create_res.status_code in (200, 201):
                 label_cache[key] = create_res.json()["id"]
             elif create_res.status_code == 409:  # Already exists
                 # Re-fetch ID
-                re_fetch = session.get(f"{GMAIL}/labels", timeout=15).json()
+                response = session.get(f"{GMAIL}/labels", timeout=15, allow_redirects=False)
+                if response.status_code != 200:
+                    raise LabelerError(f"labels_list_failed_status_{response.status_code}")
+                re_fetch = response.json()
                 for lbl in re_fetch.get("labels", []):
                     if lbl.get("name") == name:
                         label_cache[key] = lbl["id"]
@@ -58,20 +76,24 @@ def get_or_create_labels(session):
                         "Der Gmail-Token benötigt Schreibrechte (gmail.modify)."
                     )
                 raise LabelerError(
-                    f"Label '{name}' konnte nicht erstellt werden (Status {create_res.status_code}): {create_res.text}"
+                    f"Label '{name}' konnte nicht erstellt werden (Status {create_res.status_code})."
                 )
         except LabelerError:
             raise
-        except Exception as err:
-            raise LabelerError(f"Fehler beim Erstellen des Labels '{name}': {err}") from err
+        except Exception:
+            raise LabelerError(f"Fehler beim Erstellen des Labels '{name}'.") from None
 
-    return label_cache
+    return managed_label_ids(label_cache)
 
 
 def labels_for_suggestions(suggestions):
     """Determine which label keys should be applied for given model suggestions."""
-    if not isinstance(suggestions, dict):
-        return []
+    choices = {"inhalt": {"rechnung", "werbung", "info", "sonstiges"},
+               "wichtig": {"ja", "nein"}, "spamverdacht": {"ja", "nein"}}
+    if (not isinstance(suggestions, dict) or set(suggestions) != set(choices)
+            or any(not isinstance(suggestions[key], str) or suggestions[key] not in values
+                   for key, values in choices.items())):
+        raise LabelerError("Vollstaendige, gueltige Klassifizierung erforderlich.")
     keys = []
     inhalt = suggestions.get("inhalt")
     if inhalt in ("rechnung", "werbung", "info"):
@@ -84,19 +106,17 @@ def labels_for_suggestions(suggestions):
 
 
 def apply_labels(session, message_id, suggestions, label_cache, archive=False):
-    """Apply sorting labels to a Gmail message via messages.modify."""
+    """Reconcile only the five managed labels; preserve INBOX and unrelated labels."""
+    if archive is not False:
+        raise LabelerError("Archivieren wird nicht unterstuetzt.")
     keys_to_add = labels_for_suggestions(suggestions)
-    if not keys_to_add and not archive:
-        return []
-
-    missing = [k for k in keys_to_add if k not in label_cache]
-    if missing:
-        missing_names = [LABEL_MAP.get(k, k) for k in missing]
-        raise LabelerError(f"Label-IDs fehlen fuer: {', '.join(missing_names)}")
-
-    add_ids = [label_cache[k] for k in keys_to_add if k in label_cache]
-    payload = {"addLabelIds": add_ids, "removeLabelIds": ["INBOX"] if archive else []}
-    res = session.post(f"{GMAIL}/messages/{message_id}/modify", json=payload, timeout=15)
+    managed = managed_label_ids(label_cache)
+    payload = {"addLabelIds": [managed[key] for key in keys_to_add],
+               "removeLabelIds": [value for key, value in managed.items() if key not in keys_to_add]}
+    try:
+        res = session.post(f"{GMAIL}/messages/{message_id}/modify", json=payload, timeout=15, allow_redirects=False)
+    except requests.RequestException:
+        raise LabelerError("modify_request_failed") from None
     if res.status_code == 403:
         raise LabelerError(
             "Keine Berechtigung zum Ändern der E-Mail-Labels (Status 403). "
@@ -105,5 +125,5 @@ def apply_labels(session, message_id, suggestions, label_cache, archive=False):
     if res.status_code != 200:
         raise LabelerError(f"modify_failed_status_{res.status_code}")
 
-    return [LABEL_MAP[k] for k in keys_to_add if k in label_cache]
+    return [LABEL_MAP[key] for key in keys_to_add]
 

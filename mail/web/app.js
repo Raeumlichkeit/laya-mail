@@ -14,9 +14,17 @@ let editing = null;
 let saving = false;
 let reportVersion = 0;
 let errorSource = null;
-let selectedMailId = null;
+let selectedMailKey = null;
 const contentLabels = { rechnung: 'Rechnung', info: 'Allgemeine Information', werbung: 'Werbung', sonstiges: 'Sonstiges' };
 const reviewLabels = { accepted: 'Bestätigt', corrected: 'Korrigiert', skipped: 'Übersprungen' };
+
+function mailKey(mail) {
+  return JSON.stringify([mail.account_email || '', mail.message_id || '']);
+}
+
+function cardId(key) {
+  return `card-${encodeURIComponent(key)}`;
+}
 
 function renderHighlightedText(container, text) {
   if (!text) return;
@@ -168,6 +176,7 @@ function startCorrection(mail) {
   const previous = mail.review?.labels || mail.suggestions || {};
   editing = {
     report_id: report.report_id, message_id: mail.message_id, snapshot_id: mail.snapshot_id,
+    account_email: mail.account_email,
     labels: {
       inhalt: Object.hasOwn(contentLabels, previous.inhalt) ? previous.inhalt : '',
       wichtig: ['ja', 'nein'].includes(previous.wichtig) ? previous.wichtig : '',
@@ -187,8 +196,9 @@ async function saveFeedback(mail, action) {
     snapshot_id: mail.snapshot_id || null,
     action,
   };
+  if (mail.account_email) body.account_email = mail.account_email;
   if (action === 'corrected') {
-    if (!editing || !Object.hasOwn(contentLabels, editing.labels.inhalt) ||
+    if (!editing || mailKey(editing) !== mailKey(mail) || !Object.hasOwn(contentLabels, editing.labels.inhalt) ||
       !['ja', 'nein'].includes(editing.labels.wichtig) || !['ja', 'nein'].includes(editing.labels.spamverdacht)) return;
     body.labels = { ...editing.labels };
     body.snapshot_id = editing.snapshot_id;
@@ -259,14 +269,17 @@ function correctionForm(mail) {
 }
 
 function renderMail(mail) {
-  const isSelected = selectedMailId ? mail.message_id === selectedMailId : false;
+  const key = mailKey(mail);
+  const isSelected = key === selectedMailKey;
   const card = element('article', `mail-card${needsReview(mail) ? ' review-card' : ''}${isSelected ? ' selected-card' : ''}`);
   if (mail.message_id) {
-    card.id = `card-${mail.message_id}`;
+    card.id = cardId(key);
     card.addEventListener('click', () => {
-      if (selectedMailId !== mail.message_id) {
-        selectedMailId = mail.message_id;
-        renderMessages();
+      if (selectedMailKey !== key) {
+        selectedMailKey = key;
+        document.querySelectorAll('.mail-card').forEach((node) => {
+          node.classList.toggle('selected-card', node.id === cardId(key));
+        });
       }
     });
   }
@@ -336,7 +349,7 @@ function renderMail(mail) {
     modellwerte: mail.raw_scores ?? null,
   }, null, 2)));
   card.append(details);
-  if (editing?.message_id === mail.message_id && editing?.report_id === report.report_id) {
+  if (editing && mailKey(editing) === key && editing.report_id === report.report_id) {
     card.append(correctionForm(mail));
   } else {
     const actions = element('div', 'feedback-actions');
@@ -370,8 +383,8 @@ function getVisibleMessages() {
 
 function renderMessages() {
   const messages = getVisibleMessages();
-  if (messages.length > 0 && !messages.some((m) => m.message_id === selectedMailId)) {
-    selectedMailId = messages[0].message_id;
+  if (messages.length > 0 && !messages.some((mail) => mailKey(mail) === selectedMailKey)) {
+    selectedMailKey = mailKey(messages[0]);
   }
   $('messages').replaceChildren(...messages.map(renderMail));
   $('editing-note').hidden = !editing;
@@ -483,7 +496,7 @@ function renderAccounts(data) {
   const select = $('account-select');
   if (!select || !data || !Array.isArray(data.accounts)) return;
   const currentVal = data.selected || 'all';
-  select.innerHTML = '';
+  select.replaceChildren();
   const allOpt = document.createElement('option');
   allOpt.value = 'all';
   allOpt.textContent = `Alle Postfächer (${data.accounts.length})`;
@@ -686,9 +699,9 @@ $('logout').addEventListener('click', async () => {
 });
 
 document.addEventListener('keydown', (event) => {
-  if (leaving || saving) return;
+  if (leaving || saving || event.defaultPrevented || event.ctrlKey || event.altKey || event.metaKey || event.isComposing) return;
   const tag = document.activeElement?.tagName;
-  if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return;
+  if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA' || document.activeElement?.isContentEditable) return;
   const isInteractive = Boolean(
     document.activeElement?.closest
       ? document.activeElement.closest('button, a, summary')
@@ -705,21 +718,21 @@ document.addEventListener('keydown', (event) => {
   }
   const currentFiltered = getVisibleMessages();
   if (!currentFiltered.length) return;
-  const currentIndex = currentFiltered.findIndex((m) => m.message_id === selectedMailId);
+  const currentIndex = currentFiltered.findIndex((mail) => mailKey(mail) === selectedMailKey);
   const activeMail = currentIndex >= 0 ? currentFiltered[currentIndex] : currentFiltered[0];
 
   if (event.key === 'j' || event.key === 'J' || event.key === 'ArrowDown') {
     event.preventDefault();
     const nextIndex = Math.min(currentFiltered.length - 1, (currentIndex >= 0 ? currentIndex : 0) + 1);
-    selectedMailId = currentFiltered[nextIndex].message_id;
+    selectedMailKey = mailKey(currentFiltered[nextIndex]);
     renderMessages();
-    document.getElementById(`card-${selectedMailId}`)?.scrollIntoView?.({ block: 'nearest' });
+    document.getElementById(cardId(selectedMailKey))?.scrollIntoView?.({ block: 'nearest' });
   } else if (event.key === 'k' || event.key === 'K' || event.key === 'ArrowUp') {
     event.preventDefault();
     const prevIndex = Math.max(0, (currentIndex >= 0 ? currentIndex : 0) - 1);
-    selectedMailId = currentFiltered[prevIndex].message_id;
+    selectedMailKey = mailKey(currentFiltered[prevIndex]);
     renderMessages();
-    document.getElementById(`card-${selectedMailId}`)?.scrollIntoView?.({ block: 'nearest' });
+    document.getElementById(cardId(selectedMailKey))?.scrollIntoView?.({ block: 'nearest' });
   } else if (event.key === '1' || event.key === 'Enter') {
     if (activeMail && activeMail.training_ready && activeMail.status !== 'error') {
       event.preventDefault();
@@ -737,7 +750,7 @@ document.addEventListener('keydown', (event) => {
     }
   } else if (event.key === ' ') {
     event.preventDefault();
-    const cardEl = document.getElementById(`card-${selectedMailId}`);
+    const cardEl = document.getElementById(cardId(selectedMailKey));
     const details = cardEl?.querySelector?.('.input-details');
     if (details) details.open = !details.open;
   }

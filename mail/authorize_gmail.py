@@ -17,7 +17,8 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 READONLY_SCOPE = "https://www.googleapis.com/auth/gmail.readonly"
 MODIFY_SCOPE = "https://www.googleapis.com/auth/gmail.modify"
 SCOPES = [READONLY_SCOPE]
-MODIFY_SCOPES = [READONLY_SCOPE, MODIFY_SCOPE]
+MODIFY_SCOPES = [MODIFY_SCOPE]
+ALLOWED_SCOPES = {READONLY_SCOPE, MODIFY_SCOPE}
 
 
 def authorize(client_path: Path, token_path: Path, expected_project: str, modify: bool = False) -> None:
@@ -63,8 +64,14 @@ def authorize(client_path: Path, token_path: Path, expected_project: str, modify
 
     if not credentials.refresh_token or not credentials.has_scopes(target_scopes):
         raise ValueError("Required offline grant missing")
-    if credentials.granted_scopes and set(credentials.granted_scopes) != set(target_scopes):
-        raise ValueError("Unexpected granted scopes")
+    if credentials.granted_scopes:
+        granted = set(credentials.granted_scopes)
+        if modify:
+            if MODIFY_SCOPE not in granted or not granted.issubset(ALLOWED_SCOPES):
+                raise ValueError("Unexpected granted scopes")
+        else:
+            if granted != set(SCOPES):
+                raise ValueError("Unexpected granted scopes")
 
     # mkstemp creates mode 0600 on Unix and inherits the parent ACL on Windows.
     descriptor, temporary_name = tempfile.mkstemp(dir=token_path.parent, prefix=".oauth-")
