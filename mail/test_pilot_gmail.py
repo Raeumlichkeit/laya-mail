@@ -106,6 +106,29 @@ class PaginatedGmail(Gmail):
 
 
 class PilotCheck(unittest.TestCase):
+    def test_tailnet_model_urls_pass_validation_and_outside_addresses_do_not(self):
+        with tempfile.TemporaryDirectory() as folder:
+            directory = Path(folder)
+            directory.chmod(0o700)
+            output = directory / "unused-report.json"
+            for host, accepted in (("100.64.0.10", True), ("100.64.0.20", True),
+                                   ("100.63.255.255", False), ("100.128.0.0", False), ("8.8.8.8", False)):
+                errors = io.StringIO()
+                with self.subTest(host=host), redirect_stderr(errors), \
+                        patch.object(pilot.Credentials, "from_authorized_user_file",
+                                     side_effect=pilot.PilotError("synthetic_credentials_boundary")) as credentials:
+                    result = pilot.main(["--token", "unused-token.json", "--laya-key-file", "unused-key",
+                                         "--expected-account", "test@example.invalid", "--output", str(output),
+                                         "--laya-url", f"http://{host}:8002/v1/systemone"])
+                self.assertEqual(result, 1)
+                if accepted:
+                    credentials.assert_called_once_with("unused-token.json")
+                    self.assertIn("synthetic_credentials_boundary", errors.getvalue())
+                else:
+                    credentials.assert_not_called()
+                    self.assertIn("laya_url_must_be_local", errors.getvalue())
+                self.assertFalse(output.exists())
+
     def test_adjustable_limit_latest_next_and_invalid_values(self):
         url = "http://127.0.0.1:8000/v1/systemone"
         for limit in (3, 7, 100):

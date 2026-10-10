@@ -540,7 +540,7 @@ def main(argv=None):
                 raise PilotError("progress_directory_not_private")
         endpoint = urlsplit(args.laya_url)
         address = ipaddress.ip_address(endpoint.hostname)
-        if endpoint.scheme not in {"http", "https"} or not (address.is_loopback or address in ipaddress.ip_network("10.0.0.0/8") or address in ipaddress.ip_network("172.16.0.0/12") or address in ipaddress.ip_network("192.168.0.0/16")) or endpoint.username or endpoint.password or endpoint.query or endpoint.fragment or endpoint.path != "/v1/systemone":
+        if endpoint.scheme not in {"http", "https"} or not (address.is_loopback or address in ipaddress.ip_network("10.0.0.0/8") or address in ipaddress.ip_network("172.16.0.0/12") or address in ipaddress.ip_network("192.168.0.0/16") or address in ipaddress.ip_network("100.64.0.0/10")) or endpoint.username or endpoint.password or endpoint.query or endpoint.fragment or endpoint.path != "/v1/systemone":
             raise PilotError("laya_url_must_be_local")
         credentials = Credentials.from_authorized_user_file(str(args.token))
         scopes = set(credentials.scopes or [])

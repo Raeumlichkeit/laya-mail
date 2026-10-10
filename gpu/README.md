@@ -24,8 +24,9 @@ Die Schlüssel-Erstellung ist einmalig und überschreibt keine vorhandene Datei.
 
 - Standard: `127.0.0.1:8002`, nur lokale Zugriffe, keine Firewallöffnung.
 - Für den Mailserver im LAN: `host` auf die konkrete LAN-IP dieses Windows-PCs setzen; in `allowed_clients` die konkrete IP des Mailservers und die eigene Host-IP für den Start-Healthcheck eintragen. Keine Platzhalter, Subnetze oder `0.0.0.0` verwenden.
+- Für Tailscale: dieselben Felder mit den konkreten Tailscale-IP-Adressen beider Geräte befüllen. Der Mailserver unterstützt dafür auch `100.64.0.0/10`. Die Verbindung läuft verschlüsselt über Tailscale; eine öffentliche Portfreigabe ist nicht erforderlich.
 - Den zufälligen API-Schlüssel geschützt auf den Mailserver übertragen. Dort den GPU-Endpunkt `http://<GPU-HOST>:8002/v1/systemone` und eine lokale Kopie derselben Schlüsseldatei konfigurieren; siehe Haupt-README. Es werden keine Gmail-Zugangsdaten an den GPU-Dienst gesendet.
-- Bei LAN-Nutzung `gpu/Enable-Laya-Firewall.ps1` einmal in einer PowerShell mit Administratorrechten ausführen. Die Regel gilt nur im privaten Windows-Netzwerkprofil und nur für konfigurierte Client-IPs. Nach IP- oder Portänderungen erneut ausführen. HTTP bleibt auf das vertrauenswürdige lokale Netz beschränkt; keine öffentliche Portfreigabe einrichten.
+- Bei LAN- oder Tailscale-Nutzung `gpu/Enable-Laya-Firewall.ps1` einmal in einer PowerShell mit Administratorrechten ausführen. Die Regel gilt nur im privaten Windows-Netzwerkprofil, auf dem Adapter der konfigurierten Host-IP und nur für konfigurierte Client-IPs. Nach IP- oder Portänderungen erneut ausführen. HTTP bleibt auf das vertrauenswürdige lokale Netz oder Tailscale beschränkt; keine öffentliche Portfreigabe einrichten.
 
 ## Start, Stopp und Prüfung
 

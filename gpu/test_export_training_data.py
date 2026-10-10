@@ -1,5 +1,6 @@
 """Offline export checks; use synthetic messages and no dashboard connection."""
 import contextlib
+from http.client import IncompleteRead
 import io
 import json
 from pathlib import Path
@@ -23,6 +24,26 @@ def payload(*samples):
 
 
 class ExportCheck(unittest.TestCase):
+    def test_incomplete_download_never_saves_partial_or_reuses_old_data(self):
+        with tempfile.TemporaryDirectory() as folder:
+            existing = Path(folder) / "existing-run"
+            existing.mkdir()
+            old_data = existing / "laya-mail-train.jsonl"
+            old_data.write_text("old synthetic export", encoding="utf-8")
+            for output in (Path(folder) / "new-run", existing):
+                errors = io.StringIO()
+                args = ["export_training_data.py", "--url", "https://dashboard.example.invalid",
+                        "--key-file", "unused", "--output-dir", str(output)]
+                with self.subTest(output=output.name), patch("sys.argv", args), \
+                        patch("export_training_data.fetch_export", side_effect=IncompleteRead(b"PRIVATE_EMAIL_BODY", 100)), \
+                        patch("export_training_data.save_export") as save, contextlib.redirect_stderr(errors):
+                    self.assertEqual(main(), 1)
+                save.assert_not_called()
+                self.assertEqual(errors.getvalue(),
+                                 "Export failed: download incomplete. No partial or old data will be used. Please retry.\n")
+                self.assertEqual(old_data.read_text(), "old synthetic export")
+                self.assertFalse((Path(folder) / "new-run").exists())
+
     def test_gmail_spam_provenance_is_preserved_in_training_and_never_validation(self):
         weak = {"state": "Synthetic Gmail spam",
                 "questions": {"spamverdacht": {"type": "choice", "instructions": "Spam?",

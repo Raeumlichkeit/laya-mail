@@ -709,7 +709,8 @@ class Dashboard:
             if (endpoint.scheme not in {"http", "https"}
                     or not (address.is_loopback or address in ipaddress.ip_network("10.0.0.0/8")
                             or address in ipaddress.ip_network("172.16.0.0/12")
-                            or address in ipaddress.ip_network("192.168.0.0/16"))
+                            or address in ipaddress.ip_network("192.168.0.0/16")
+                            or address in ipaddress.ip_network("100.64.0.0/10"))
                     or endpoint.username or endpoint.password or endpoint.query or endpoint.fragment
                     or endpoint.path != "/v1/systemone" or config.get("key_file") != "gpu-api-key"):
                 raise ValueError("Invalid local GPU configuration")
@@ -946,7 +947,8 @@ class Handler(BaseHTTPRequestHandler):
         if download:
             self.send_header("Content-Disposition", f'attachment; filename="{download}"')
         self.end_headers()
-        self.wfile.write(body)
+        for offset in range(0, len(body), 64 * 1024):
+            self.wfile.write(body[offset:offset + 64 * 1024])
 
     def json(self, code, value):
         self.respond(code, json.dumps(value, ensure_ascii=False).encode())

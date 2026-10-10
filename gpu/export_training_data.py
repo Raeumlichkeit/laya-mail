@@ -1,5 +1,6 @@
 """Fetch one consistent dashboard export; never fall back to stale local data."""
 import argparse
+from http.client import IncompleteRead
 from http.cookiejar import CookieJar
 import json
 from pathlib import Path
@@ -59,6 +60,9 @@ def main():
     args = parser.parse_args()
     try:
         train_count, val_count = save_export(fetch_export(args.url, args.key_file), args.output_dir)
+    except IncompleteRead:
+        print("Export failed: download incomplete. No partial or old data will be used. Please retry.", file=sys.stderr)
+        return 1
     except URLError:
         print("Export failed: dashboard unreachable or access denied. No old data will be used.", file=sys.stderr)
         return 1

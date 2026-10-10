@@ -14,6 +14,31 @@ from pilot_gmail import save_report
 
 
 class BackendCheck(unittest.TestCase):
+    def test_tailnet_gpu_selection_keeps_public_targets_blocked(self):
+        with tempfile.TemporaryDirectory() as folder:
+            directory = Path(folder)
+            (directory / "dashboard-key").write_text("synthetic-dashboard-key-for-offline-test")
+            (directory / "gpu-api-key").write_text("SYNTHETIC_GPU_SECRET")
+            cpu_url = "http://127.0.0.1:8000/v1/systemone"
+            with patch("dashboard.LiveWatcher.start"), patch("dashboard.requests.Session") as session:
+                app = Dashboard(directory, "test@example.invalid", cpu_url)
+                probe = session.return_value.__enter__.return_value
+                probe.get.return_value = SimpleNamespace(status_code=200, json=lambda: {
+                    "status": "ok", "device": "cuda", "loaded": ["multilingual"]})
+                for host, accepted in (("100.64.0.10", True), ("100.64.0.20", True),
+                                       ("100.63.255.255", False), ("100.128.0.0", False), ("8.8.8.8", False)):
+                    with self.subTest(host=host):
+                        gpu_url = f"http://{host}:8002/v1/systemone"
+                        save_report(directory / "gpu-backend.json", {"url": gpu_url, "key_file": "gpu-api-key"})
+                        probe.get.reset_mock()
+                        selected = app.select_backend()
+                        self.assertEqual(selected[0], gpu_url if accepted else cpu_url)
+                        if accepted:
+                            self.assertEqual(selected[2]["device"], "cuda")
+                            probe.get.assert_called_once_with(f"http://{host}:8002/health", timeout=2, allow_redirects=False)
+                        else:
+                            probe.get.assert_not_called()
+
     def test_gpu_selection_cpu_fallback_and_batch_commands(self):
         with tempfile.TemporaryDirectory() as folder:
             directory = Path(folder)

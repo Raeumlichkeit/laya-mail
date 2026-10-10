@@ -18,11 +18,11 @@ try {
     if ($status.device -eq 'cuda') { Write-Output 'Laya GPU läuft bereits.'; exit 0 }
 } catch {}
 $existing = Get-CimInstance Win32_Process -Filter "Name='python.exe'" |
-    Where-Object { $_.CommandLine -and $_.CommandLine.Contains('"' + $scriptPath + '"') -and $_.CommandLine.Contains('"' + $configPath + '"') }
+    Where-Object { $_.CommandLine -and $_.CommandLine.Contains($scriptPath) -and $_.CommandLine.Contains($configPath) }
 if ($existing) { Write-Output 'Laya GPU startet bereits.'; exit 0 }
 $logPath = Join-Path $repoRoot 'runtime\gpu'
 New-Item -ItemType Directory -Path $logPath -Force | Out-Null
-Start-Process -FilePath $pythonPath -ArgumentList @('-u', $scriptPath, '--config', $configPath) `
+Start-Process -FilePath $pythonPath -ArgumentList @('-u', ('"{0}"' -f $scriptPath), '--config', ('"{0}"' -f $configPath)) `
     -WorkingDirectory $repoRoot -WindowStyle Hidden `
     -RedirectStandardOutput (Join-Path $logPath 'server.log') `
     -RedirectStandardError (Join-Path $logPath 'server-error.log') | Out-Null
