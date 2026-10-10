@@ -23,6 +23,7 @@ import sys
 import tempfile
 from urllib.parse import urlsplit
 
+from google.auth.exceptions import RefreshError
 from google.auth.transport.requests import AuthorizedSession
 from google.oauth2.credentials import Credentials
 import requests
@@ -191,6 +192,10 @@ def mail_text(message):
 def gmail_get(session, path, **params):
     try:
         response = request_with_retry(session, "GET", GMAIL + path, params=params, timeout=30)
+    except RefreshError as error:
+        # Refresh responses can contain private metadata; expose only fixed codes.
+        code = "gmail_temporary_error" if error.retryable else "gmail_authentication_failed"
+        raise PilotError(code) from None
     except (requests.Timeout, requests.ConnectionError):
         raise PilotError("gmail_temporary_error") from None
     except requests.RequestException:

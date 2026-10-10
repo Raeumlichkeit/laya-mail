@@ -2,6 +2,9 @@
 from contextlib import redirect_stderr, redirect_stdout
 from email.utils import formatdate
 import io
+from pathlib import Path
+import tempfile
+import traceback
 import unittest
 from unittest.mock import Mock, call, patch
 
@@ -10,6 +13,7 @@ import requests
 import gmail_http as http
 import labeler
 import pilot_gmail as pilot
+import spam_training
 from test_pilot_gmail import Gmail, Laya
 
 
@@ -89,6 +93,51 @@ class GmailHTTPCheck(unittest.TestCase):
             pilot.gmail_get(session, "/messages/abc123")
         self.assertEqual(str(caught.exception), "gmail_request_failed")
         session.get.assert_called_once()
+
+    def test_credentials_refresh_failure_is_classified_without_private_details(self):
+        for retryable, code in ((False, "gmail_authentication_failed"), (True, "gmail_temporary_error")):
+            for path in ("/profile", "/messages", "/messages/abc123"):
+                with self.subTest(retryable=retryable, path=path):
+                    credentials = pilot.Credentials(token=None, refresh_token="synthetic", token_uri="https://oauth2.googleapis.com/token",
+                                                    client_id="synthetic", client_secret="synthetic")
+                    failure = pilot.RefreshError(PRIVATE, {"error_description": PRIVATE}, retryable=retryable)
+                    output = io.StringIO()
+                    with pilot.AuthorizedSession(credentials) as session, \
+                            patch.object(credentials, "refresh", side_effect=failure) as refresh, \
+                            patch.object(requests.Session, "send", side_effect=AssertionError("No network")) as send, \
+                            redirect_stdout(output), redirect_stderr(output), self.assertRaises(pilot.PilotError) as caught:
+                        pilot.gmail_get(session, path)
+                    refresh.assert_called_once()
+                    send.assert_not_called()
+                    self.sleep.assert_not_called()
+                    self.assertEqual(str(caught.exception), code)
+                    self.assertNotIn(PRIVATE, output.getvalue() + "".join(traceback.format_exception(caught.exception)))
+
+    def test_refresh_failure_reaches_cli_and_spam_reader_as_fixed_auth_code(self):
+        session = Mock()
+        session.get.side_effect = pilot.RefreshError(PRIVATE, {"error": "invalid_grant"})
+        with self.assertRaises(pilot.PilotError) as caught:
+            spam_training.collect_spam(session, "test@gmail.com", set())
+        self.assertEqual(str(caught.exception), "gmail_authentication_failed")
+        session.get.assert_called_once()
+        with tempfile.TemporaryDirectory() as directory:
+            private = Path(directory)
+            private.chmod(0o700)
+            key_path = private / "laya-key"
+            key_path.write_text("SYNTHETIC-KEY", encoding="utf-8")
+            report_path = private / "report.json"
+            output = io.StringIO()
+            with patch.object(pilot.Credentials, "from_authorized_user_file", return_value=Mock(scopes=[pilot.READONLY_SCOPE])), \
+                    patch.object(pilot, "AuthorizedSession") as gmail_context, \
+                    patch.object(requests.Session, "send", side_effect=AssertionError("No network")) as send, \
+                    redirect_stdout(output), redirect_stderr(output):
+                gmail_context.return_value.__enter__.return_value = session
+                result = pilot.main(["--token", str(private / "unused-token.json"), "--laya-key-file", str(key_path),
+                                     "--output", str(report_path), "--expected-account", "test@gmail.com"])
+            self.assertEqual(result, 1)
+            self.assertEqual(output.getvalue(), "Pilot fehlgeschlagen: gmail_authentication_failed\n")
+            self.assertFalse(report_path.exists())
+            send.assert_not_called()
 
     def test_retry_after_is_respected_and_long_waits_return_original_response(self):
         for header, delay in (("7", 7), (formatdate(1012, usegmt=True), 12), ("malformed", 1.25)):
